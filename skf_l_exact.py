@@ -68,10 +68,15 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
   b_eta = parameters["b_eta"]
   v_tilde_0 = parameters["v_tilde_0"]
 
-  # No regularization of x here, to match sKF_algorithm and sKF_L_algorithm.
-  # NOTE: sKF_L_integral_algorithm regularizes internally with
-  # x_reg = np.sign(x)*(np.abs(x) + 1e-3). To compare the two routes on exactly
-  # the same input, pass that same x_reg to this function.
+  # No regularization of x here, matching sKF_algorithm and sKF_L_algorithm.
+  # sKF_L_integral_algorithm does regularize internally, with
+  # x_reg = np.sign(x)*(np.abs(x) + 1e-3), so the two routes see slightly
+  # different inputs. Measured, that is worth about 0.2% of the weights
+  # (max 2.9e-3 at epsilon=0.01, b_eta=50*sqrt(var_v)), well under the
+  # integral-vs-closed gap at dx_factor=1/100, which is why it does not change
+  # the comparison today. It is a floor, though, not a discretization error: it
+  # does not shrink as the grid is refined. If the grid is ever taken far enough
+  # that the gap drops below ~3e-3, pass x_reg here as well.
 
   L = len(h)
   y = np.zeros((N,))
