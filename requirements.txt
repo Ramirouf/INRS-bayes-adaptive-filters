@@ -39,3 +39,4 @@ tornado==6.5.8
 traitlets==5.16.1
 typing_extensions==4.16.0
 wcwidth==0.8.3
+rir-generator==0.3.0
