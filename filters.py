@@ -28,8 +28,27 @@ from collections.abc import Callable
 from matplotlib import pyplot as plt
 from numba.types import Array, complex128, float64
 from scipy.special import log_ndtr, logsumexp
+from collections import namedtuple
 
+GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
+NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
 
+NLMS_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
+                        ("mu", "f8"),     # 64-bit floating-point number
+                        ("delta", "f8")   # 64-bit floating-point number
+                      ])
+
+sKF_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
+                        ("epsilon", "f8"),     # 64-bit floating-point number
+                        ("var_eta", "f8"),   # 64-bit floating-point number
+                        ("v_tilde_0", "f8")   # 64-bit floating-point number
+                      ])
+
+sKF_L_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
+                        ("epsilon", "f8"),     # 64-bit floating-point number
+                        ("b_eta", "f8"),   # Escala de la distribución de Laplace
+                        ("v_tilde_0", "f8")   # 64-bit floating-point number
+                      ])
 
 @njit(cache=True)
 def autocorr_matrix_estimate(signal, M = 4):
@@ -145,24 +164,6 @@ def filter(a, b, x):
 
   return y
 
-
-NLMS_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
-                        ("mu", "f8"),     # 64-bit floating-point number
-                        ("delta", "f8")   # 64-bit floating-point number
-                      ])
-
-sKF_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
-                        ("epsilon", "f8"),     # 64-bit floating-point number
-                        ("var_eta", "f8"),   # 64-bit floating-point number
-                        ("v_tilde_0", "f8")   # 64-bit floating-point number
-                      ])
-
-sKF_L_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
-                        ("epsilon", "f8"),     # 64-bit floating-point number
-                        ("b_eta", "f8"),   # Escala de la distribución de Laplace
-                        ("v_tilde_0", "f8")   # 64-bit floating-point number
-                      ])
-
 @njit(cache=True)
 def NLMS_algorithm(N, x, d, h0, parameters):
   h = h0
@@ -184,6 +185,36 @@ def NLMS_algorithm(N, x, d, h0, parameters):
       h = h + mu*xtemp*e[k]/x_power
 
   return {'h': h, 'y': y, 'e': e}
+
+@njit(cache=True)
+def GMVC_algorithm(N, x, d, h0, params):
+    # Generalized Maximum Versoria Correntropy Algorithm
+    h = h0
+    mu = params.mu
+    tau = params.tau
+    p = params.p
+    
+    L = len(h)
+    y = np.zeros((N,))
+    e = np.zeros((N,))
+    xtemp = np.zeros(L)
+    
+    for k in range(0,N):
+        xtemp = shift(x[k], xtemp)
+        y[k] = h @ xtemp
+        e[k] = d[k] - y[k]
+    
+        if k >= L:
+            if p > 1:
+                power_e = np.abs(e[k])**(p-1)
+            elif p == 1:
+                power_e = 1
+            else:
+                raise ValueError("Parameter p must be greater than or equal to 1")
+            g = mu*np.sign(e[k])*power_e/((1 + tau*power_e*np.abs(e[k]))**2)
+            h = h + g*xtemp
+    
+    return {'h': h, 'y': y, 'e': e}
 
 def sKF_algorithm(N, x, d, h0, parameters):
   h = h0
