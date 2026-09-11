@@ -57,7 +57,7 @@ def std_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
     d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
     x = x[L:N+L]
 
-    return {'x': x, 'v': v, 'd': d, 'ho_hist': params.ho}
+    return params.ho, {'x': x, 'v': v, 'd': d}
 
 @njit(cache=True)
 def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool = True):
@@ -73,9 +73,26 @@ def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool
 
     # Determine the desired signal
     d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
-    x = x[L: N+L ]
+    x = x[L:N+L]
 
-    return {'x': x, 'v': v, 'd': d, 'ho_hist': params.ho}
+    return params.ho, {'x': x, 'v': v, 'd': d}
+
+@njit(cache=True)
+def _compute_MSD(h_hist, ho):
+    if ho.ndim == 1:
+        normalization_factor = np.dot(ho, ho)
+    else:
+        normalization_factor = np.diag(ho @ ho.T)
+    h_error = h_hist - ho
+    
+    MSD = np.zeros(h_error.shape[0])
+    for k in range(h_error.shape[0]):
+        MSD[k] = np.linalg.norm(h_error[k,:])**2
+        if ho.ndim == 1:
+            MSD[k] /= normalization_factor
+        else:
+            MSD[k] /= normalization_factor[k]
+    return MSD
 
 def MC_Simulations(N, 
                    NR,
@@ -90,25 +107,26 @@ def MC_Simulations(N,
     measure_init = lambda taps, N_iter: {'h': np.zeros((N_iter, taps)),
                                          'J': np.zeros(N_iter),
                                          'Jex': np.zeros(N_iter),
+                                         'MSD': np.zeros(N_iter),
                                          'var': np.zeros((N_iter, taps))}
   
     measures = {Parameters[k].label: measure_init(L, N) for k in range(N_Algorithms)}
   
     for k in range(NR):
-        signals = environment(N, environment_parameters)
+        ho, signals = environment(N, environment_parameters)
         x = signals['x']
         d = signals['d']
   
         for c in range(N_Algorithms):
             label = Parameters[c].label
+            #h_hist, algorithm_signals = Algorithms[c](N, x, d, h0, Parameters[c])
             algorithm_signals = Algorithms[c](N, x, d, h0, Parameters[c])
-            measures[label]['h'] += algorithm_signals['h']
-            measures[label]['J'] += algorithm_signals['e']**2
-            measures[label]['Jex'] += (algorithm_signals['e']- signals['v'])**2
-            if 'v' in algorithm_signals:
-                measures[label]['var'] += algorithm_signals['v']
-            else:
-                measures[label]['var'] += np.zeros((N, L))
+            
+            measures[label]['h'] += algorithm_signals.h
+            measures[label]['J'] += algorithm_signals.e**2
+            measures[label]['Jex'] += (algorithm_signals.e - signals['v'])**2
+            measures[label]['MSD'] += _compute_MSD(algorithm_signals.h, ho)
+            measures[label]['var'] += algorithm_signals.v
   
         if not PBar is None:
             PBar.update(1)
@@ -121,5 +139,6 @@ def MC_Simulations(N,
         measures[label]['J'] /= NR
         measures[label]['Jex'] /= NR
         measures[label]['var'] /= NR
+        measures[label]['MSD'] /= NR
   
     return measures

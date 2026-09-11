@@ -32,6 +32,7 @@ from collections import namedtuple
 
 GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
 NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
+filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 
 NLMS_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
                         ("mu", "f8"),     # 64-bit floating-point number
@@ -174,8 +175,10 @@ def NLMS_algorithm(N, x, d, h0, parameters):
   y = np.zeros((N,))
   e = np.zeros((N,))
   xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
 
   for k in range(0,N):
+    h_hist[k] = h
     xtemp = shift(x[k], xtemp)
     y[k] = h @ xtemp
     e[k] = d[k] - y[k]
@@ -184,7 +187,7 @@ def NLMS_algorithm(N, x, d, h0, parameters):
       x_power = delta + xtemp @ xtemp
       h = h + mu*xtemp*e[k]/x_power
 
-  return {'h': h, 'y': y, 'e': e}
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
 
 @njit(cache=True)
 def GMVC_algorithm(N, x, d, h0, params):
@@ -198,8 +201,10 @@ def GMVC_algorithm(N, x, d, h0, params):
     y = np.zeros((N,))
     e = np.zeros((N,))
     xtemp = np.zeros(L)
+    h_hist = np.zeros((N, L))
     
     for k in range(0,N):
+        h_hist[k] = h
         xtemp = shift(x[k], xtemp)
         y[k] = h @ xtemp
         e[k] = d[k] - y[k]
@@ -214,7 +219,8 @@ def GMVC_algorithm(N, x, d, h0, params):
             g = mu*np.sign(e[k])*power_e/((1 + tau*power_e*np.abs(e[k]))**2)
             h = h + g*xtemp
     
-    return {'h': h, 'y': y, 'e': e}
+    return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
+    #return h_hist, {'y': y, 'e': e}
 
 def sKF_algorithm(N, x, d, h0, parameters):
   h = h0
@@ -251,6 +257,7 @@ def sKF_algorithm(N, x, d, h0, parameters):
       h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
       v = v * (1 - (v * norm) / (L * s)) 
 
+  
   return {'h': h_hist, 'y': y, 'e': e, 'v': v_hist}
 
 def sKF_L_algorithm(N, x, d, h0, parameters):
