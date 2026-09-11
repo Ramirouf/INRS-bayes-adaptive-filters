@@ -28,8 +28,28 @@ from collections.abc import Callable
 from matplotlib import pyplot as plt
 from numba.types import Array, complex128, float64
 from scipy.special import log_ndtr, logsumexp
+from collections import namedtuple
 
+from numpy.typing import NDArray
 
+GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
+NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
+
+sKF_parameters = namedtuple('sKF_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0'])
+sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
+
+sKF_L_parameters = namedtuple('sKF_L_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0'])
+sKF_L_int_parameters = namedtuple('sKF_L_int_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
+
+filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
+
+std_env_parameters = namedtuple('std_env_parameters', ['ho', 'AR','var_v','var_x'])
+laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
+
+# Tipos de array estáticos exigidos pelo objmode
+Complex1D = Array(complex128, 1, "C")
+Complex2D = Array(complex128, 2, "C")
+Float1D   = Array(float64, 1, "C")
 
 @njit(cache=True)
 def autocorr_matrix_estimate(signal, M = 4):
@@ -74,9 +94,9 @@ def autocorr_matrix_calc(AR, var_v, M = None):
   A[0,:] = -AR[1:]
 
   # Intermediate values associated with the calclulation
-  AA = np.kron(A,A);
+  AA = np.kron(A,A)
   BB_vec_IL = np.zeros((L**2,))  # Effect of the matrix operating over the input data on the state space
-  BB_vec_IL[0] = 1;
+  BB_vec_IL[0] = 1
   I_L2 = np.eye(L**2)
 
   # Calculation of the autocorrelation matrix with the first L values
@@ -145,24 +165,6 @@ def filter(a, b, x):
 
   return y
 
-
-NLMS_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
-                        ("mu", "f8"),     # 64-bit floating-point number
-                        ("delta", "f8")   # 64-bit floating-point number
-                      ])
-
-sKF_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
-                        ("epsilon", "f8"),     # 64-bit floating-point number
-                        ("var_eta", "f8"),   # 64-bit floating-point number
-                        ("v_tilde_0", "f8")   # 64-bit floating-point number
-                      ])
-
-sKF_L_params = np.dtype([("label", "U20"), # Unicode string up to 20 characters
-                        ("epsilon", "f8"),     # 64-bit floating-point number
-                        ("b_eta", "f8"),   # Escala de la distribución de Laplace
-                        ("v_tilde_0", "f8")   # 64-bit floating-point number
-                      ])
-
 @njit(cache=True)
 def NLMS_algorithm(N, x, d, h0, parameters):
   h = h0
@@ -173,8 +175,10 @@ def NLMS_algorithm(N, x, d, h0, parameters):
   y = np.zeros((N,))
   e = np.zeros((N,))
   xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
 
   for k in range(0,N):
+    h_hist[k] = h
     xtemp = shift(x[k], xtemp)
     y[k] = h @ xtemp
     e[k] = d[k] - y[k]
@@ -183,13 +187,46 @@ def NLMS_algorithm(N, x, d, h0, parameters):
       x_power = delta + xtemp @ xtemp
       h = h + mu*xtemp*e[k]/x_power
 
-  return {'h': h, 'y': y, 'e': e}
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
+
+@njit(cache=True)
+def GMVC_algorithm(N, x, d, h0, params):
+    # Generalized Maximum Versoria Correntropy Algorithm
+    h = h0
+    mu = params.mu
+    tau = params.tau
+    p = params.p
+    
+    L = len(h)
+    y = np.zeros((N,))
+    e = np.zeros((N,))
+    xtemp = np.zeros(L)
+    h_hist = np.zeros((N, L))
+    
+    for k in range(0,N):
+        h_hist[k] = h
+        xtemp = shift(x[k], xtemp)
+        y[k] = h @ xtemp
+        e[k] = d[k] - y[k]
+    
+        if k >= L:
+            if p > 1:
+                power_e = np.abs(e[k])**(p-1)
+            elif p == 1:
+                power_e = 1
+            else:
+                raise ValueError("Parameter p must be greater than or equal to 1")
+            g = mu*np.sign(e[k])*power_e/((1 + tau*power_e*np.abs(e[k]))**2)
+            h = h + g*xtemp
+    
+    return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
+    #return h_hist, {'y': y, 'e': e}
 
 def sKF_algorithm(N, x, d, h0, parameters):
   h = h0
-  epsilon = parameters["epsilon"]
-  var_eta = parameters["var_eta"]
-  v_tilde_0 = parameters["v_tilde_0"]
+  epsilon = parameters.epsilon
+  var_eta = parameters.var_eta
+  v_tilde_0 = parameters.v_tilde_0
 
   # normalize x
   # regularization = 1e-3
@@ -220,13 +257,14 @@ def sKF_algorithm(N, x, d, h0, parameters):
       h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
       v = v * (1 - (v * norm) / (L * s)) 
 
-  return {'h': h_hist, 'y': y, 'e': e, 'v': v_hist}
+  
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 def sKF_L_algorithm(N, x, d, h0, parameters):
     h = h0
-    epsilon = parameters["epsilon"]
-    b_eta = parameters["b_eta"]
-    v_tilde_0 = parameters["v_tilde_0"]
+    epsilon = parameters.epsilon
+    b_eta = parameters.b_eta
+    v_tilde_0 = parameters.v_tilde_0  
 
     # normalize x
     # regularization = 1e-3
@@ -257,7 +295,7 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
             h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
             v = v * (1 - (v * norm) / (L * s)) 
 
-    return {'h': h_hist, 'y': y, 'e': e, 'v': v_hist}
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 """Exact scalar-variance filter for a Gaussian prior with a Laplacian likelihood.
 
@@ -315,9 +353,9 @@ _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma 
 def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     """sKF-L (exact), Section 5 of the draft. See the module docstring."""
     h = h0
-    epsilon = parameters["epsilon"]
-    b_eta = parameters["b_eta"]
-    v_tilde_0 = parameters["v_tilde_0"]
+    epsilon = parameters.epsilon
+    b_eta = parameters.b_eta
+    v_tilde_0 = parameters.v_tilde_0
 
     # No regularization of x here, matching sKF_algorithm and sKF_L_algorithm.
     # sKF_L_integral_algorithm does regularize internally, with
@@ -391,8 +429,56 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             )
             v = v_tilde + D * norm / L
 
-    return {"h": h_hist, "y": y, "e": e, "v": v_hist}
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
+@njit(cache=True)
+def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True):
+    # Determine the input signal x through a AR process
+    settling_time = AR_settling_time(AR, error = 0.001)*warm_up
+    x = np.random.randn(N + settling_time)
+    
+    # Generate the correlated signal
+    AR = AR/AR[0]
+    aux_Rxx = autocorr_matrix_calc(AR, 1, M = len(AR) - 1)
+    b = np.sqrt(1/aux_Rxx[0,0])
+    x = filter(AR, np.array([b]), x)[settling_time:]
+    
+    return x
+
+@njit(cache=True)
+def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = np.sqrt(params.var_v)*np.random.randn(N)
+
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up)
+
+    # Determine the desired signal
+    d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
+    x = x[L:N+L]
+
+    return params.ho, {'x': x, 'v': v, 'd': d}
+
+@njit(cache=True)
+def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool = True):
+#(N, ho, var_x, scale_v, AR, settling_time = 0):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = np.random.laplace(loc=0.0, scale=params.scale_v, size=(N,))
+    
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up)
+
+    # Determine the desired signal
+    d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
+    x = x[L:N+L]
+
+    return params.ho, {'x': x, 'v': v, 'd': d}
 
 @njit(cache=True)
 def std_behavior(N, ho, var_x, var_v, AR, settling_time = 0):
@@ -419,28 +505,69 @@ def std_behavior(N, ho, var_x, var_v, AR, settling_time = 0):
   return {'x': x, 'v': v, 'd': d}
 
 @njit(cache=True)
-def laplacian_noise_behavior(N, ho, var_x, scale_v, AR, settling_time = 0):
-  # AR process order and filter length
-  P = len(AR)
-  L = len(ho)
+def _compute_MSD(h_hist, ho):
+    if ho.ndim == 1:
+        normalization_factor = np.dot(ho, ho)
+    else:
+        normalization_factor = np.diag(ho @ ho.T)
+    h_error = h_hist - ho
+    
+    MSD = np.zeros(h_error.shape[0])
+    for k in range(h_error.shape[0]):
+        MSD[k] = np.linalg.norm(h_error[k,:])**2
+        if ho.ndim == 1:
+            MSD[k] /= normalization_factor
+        else:
+            MSD[k] /= normalization_factor[k]
+    return MSD
 
-  # Determine the noise signal
-  v = np.random.laplace(loc=0.0, scale=scale_v, size=(N,))
-
-  # Determine the input signal x through a AR process
-  x = np.random.randn(N + settling_time + L)
-
-  # Generate the correlated signal
-  AR = AR/AR[0]
-  aux_Rxx = autocorr_matrix_calc(AR, 1, M = len(AR) - 1)
-  b = np.sqrt(var_x/aux_Rxx[0,0])
-  x = filter(AR, np.array([b]), x)[settling_time:]
-
-  # Determine the desired signal
-  d = v + np.convolve(ho, x, mode = 'full')[L:N+L]
-  x = x[L:N+L]
-
-  return {'x': x, 'v': v, 'd': d}
+def MC_Simulations(N, 
+                   NR,
+                   environment_parameters,
+                   environment,
+                   Algorithms,
+                   Parameters,
+                   h0,
+                   PBar = None):
+    L = len(h0)
+    N_Algorithms = len(Algorithms)
+    measure_init = lambda taps, N_iter: {'h': np.zeros((N_iter, taps)),
+                                         'J': np.zeros(N_iter),
+                                         'Jex': np.zeros(N_iter),
+                                         'MSD': np.zeros(N_iter),
+                                         'var': np.zeros((N_iter, taps))}
+  
+    measures = {Parameters[k].label: measure_init(L, N) for k in range(N_Algorithms)}
+  
+    for k in range(NR):
+        ho, signals = environment(N, environment_parameters)
+        x = signals['x']
+        d = signals['d']
+  
+        for c in range(N_Algorithms):
+            label = Parameters[c].label
+            algorithm_signals = Algorithms[c](N, x, d, h0, Parameters[c])
+            
+            measures[label]['h'] += algorithm_signals.h
+            measures[label]['J'] += algorithm_signals.e**2
+            measures[label]['Jex'] += (algorithm_signals.e - signals['v'])**2
+            measures[label]['MSD'] += _compute_MSD(algorithm_signals.h, ho)
+            measures[label]['var'] += algorithm_signals.v
+  
+        if not PBar is None:
+            PBar.update(1)
+        else:
+            print(f'Realization {k} out of {NR}')
+    
+    for k in range(N_Algorithms):
+        label = Parameters[k].label
+        measures[label]['h'] /= NR
+        measures[label]['J'] /= NR
+        measures[label]['Jex'] /= NR
+        measures[label]['var'] /= NR
+        measures[label]['MSD'] /= NR
+  
+    return measures
 
 def MC_Simulations_Modular(N, NR, ho, var_x, var_v, h0, Algorithms, Parameters, AR, PBar = None):
   L = len(h0)
@@ -518,21 +645,6 @@ def MC_Simulations_Modular_Variance(N, NR, ho, var_x, var_v, h0, Algorithms, Par
 
   return measures
 
-
-skf_int_params = np.dtype([("label", "U20"),  # Unicode string up to 20 characters
-                           ("epsilon", "f8"), # 64-bit floating-point number
-                           ("var_theta_0", "f8"),  # 64-bit floating-point number
-                           ("var_eta", "f8"), # 64-bit floating-point number
-                           ("dx_factor", "f8"),
-                           ("min_std_deviations", "f8")])
-
-skf_L_int_params = np.dtype([("label", "U20"),  # Unicode string up to 20 characters
-                           ("epsilon", "f8"), # 64-bit floating-point number
-                           ("var_theta_0", "f8"),  # 64-bit floating-point number
-                           ("b_eta", "f8"), # 64-bit floating-point number
-                           ("dx_factor", "f8"),
-                           ("min_std_deviations", "f8")])
-
 gaussian_params = np.dtype([("mean", "f8"),
                             ("variance", "f8")])
 laplacian_params = np.dtype([("mean", "f8"),
@@ -578,11 +690,6 @@ def fft_integral_convolve(f, g, dx):
         riemann_sum = scipy.signal.fftconvolve(f, g, mode='full')
 
     return dx * riemann_sum[input_len//2:3*input_len//2]
-
-# Tipos de array estáticos exigidos pelo objmode
-Complex1D = Array(complex128, 1, "C")
-Complex2D = Array(complex128, 2, "C")
-Float1D   = Array(float64, 1, "C")
 
 @njit(cache=True)
 def integral_convolve_from_base_pdf(full_signals,
@@ -637,7 +744,7 @@ def integral_convolve_from_base_pdf(full_signals,
       log_espectre_prod += -2j*np.pi*total_translation*freq_space/N_conv
       espectre_prod = np.exp(log_espectre_prod)
     else:
-      espectre_prod = espectres[0].copy()
+      espectre_prod = np.copy(espectres[0])
       for k in range(1, K):
           espectre_prod *= espectres[k]
       total_translation = J*center_sample + (translations @ freq_scalings)/dx
@@ -684,19 +791,19 @@ def _get_integration_range(relative_range,
 def sKF_integral_algorithm(N, x, d, w0, parameters):
   w_hist = np.zeros((N, len(w0))) # Nuevo
   var_theta_hist = np.zeros((N, len(w0))) # NUEVO !!!!
-  w = w0.copy()
+  w = np.copy(w0)
   L = len(w)
   regularization = 1e-3
   x_reg = np.sign(x)*(np.abs(x) + regularization)
 
-  scalar_var_theta = parameters["var_theta_0"]
+  scalar_var_theta = parameters.v_tilde_0
   var_theta = scalar_var_theta*np.ones((L,))
-  epsilon = parameters["epsilon"]
-  var_eta = parameters["var_eta"]
+  epsilon = parameters.epsilon
+  var_eta = parameters.var_eta
   eta_parameters = np.void((0, var_eta), dtype=gaussian_params)
 
   #dx = np.min([epsilon, var_eta])*parameters.dx_factor
-  relative_range = parameters["min_std_deviations"]
+  relative_range = parameters.min_std_deviations
 
   y = np.zeros((N,))
   e = np.zeros((N,))
@@ -708,15 +815,15 @@ def sKF_integral_algorithm(N, x, d, w0, parameters):
     y[k] = w @ xtemp
     e[k] = d[k] - y[k]
 
-    w_hist[k] = w.copy() # NUEVO
-    var_theta_hist[k] = scalar_var_theta.copy() # NUEVO
+    w_hist[k] = np.copy(w) # NUEVO
+    var_theta_hist[k] = np.copy(scalar_var_theta) # NUEVO
     if k >= L:
       var_tilde = scalar_var_theta + epsilon
       worst_var_zeta = var_eta + (np.linalg.norm(xtemp)**2)*var_tilde
       mean_S = y[k] - w*xtemp
 
       #print(f"Var_tilde: {var_tilde}; Var_eta: {var_eta}; Worst Var_zeta: {worst_var_zeta}")
-      dx = np.sqrt(np.min([var_tilde, var_eta]))*parameters["dx_factor"]
+      dx = np.sqrt(np.min([var_tilde, var_eta]))*parameters.dx_factor
       int_range = _get_integration_range(relative_range,
                            var_tilde,
                            worst_var_zeta,
@@ -781,23 +888,23 @@ def sKF_integral_algorithm(N, x, d, w0, parameters):
       scalar_var_theta = np.mean(var_theta)
       # var_theta_hist[k] = var_theta
 
-  return {'h': w_hist, 'y': y, 'e': e, 'v': var_theta_hist}
+  return filter_output(y=y, e=e, h=w_hist, v=var_theta_hist)
 
 def sKF_L_integral_algorithm(N, x, d, w0, parameters):
-  w = w0.copy()
+  w = np.copy(w0)
   L = len(w)
 
   w_hist = np.zeros((N, len(w0)))
   var_theta_hist = np.zeros((N, len(w0)))
 
-  scalar_var_theta = parameters["var_theta_0"]
+  scalar_var_theta = parameters.v_tilde_0
   var_theta = scalar_var_theta*np.ones((L,))
-  epsilon = parameters["epsilon"]
-  b_eta = parameters["b_eta"]
+  epsilon = parameters.epsilon
+  b_eta = parameters.b_eta
   var_eta = 2*b_eta**2
   eta_parameters = np.void((0, b_eta), dtype=laplacian_params)
 
-  relative_range = parameters["min_std_deviations"]
+  relative_range = parameters.min_std_deviations
 
   y = np.zeros((N,))
   e = np.zeros((N,))
@@ -812,15 +919,15 @@ def sKF_L_integral_algorithm(N, x, d, w0, parameters):
     y[k] = w @ xtemp
     e[k] = d[k] - y[k]
 
-    w_hist[k] = w.copy()
-    var_theta_hist[k] = scalar_var_theta.copy()
+    w_hist[k] = np.copy(w)
+    var_theta_hist[k] = np.copy(scalar_var_theta)
     if k >= L:
       var_tilde = scalar_var_theta + epsilon
       worst_var_zeta = var_eta + (np.linalg.norm(xtemp)**2)*var_tilde
       mean_S = y[k] - w*xtemp
 
       #print(f"Var_tilde: {var_tilde}; Var_eta: {var_eta}; Worst Var_zeta: {worst_var_zeta}")
-      dx = np.sqrt(np.min([var_tilde, var_eta]))*parameters["dx_factor"]
+      dx = np.sqrt(np.min([var_tilde, var_eta]))*parameters.dx_factor
       int_range = _get_integration_range(relative_range,
                            var_tilde,
                            worst_var_zeta,
@@ -880,4 +987,4 @@ def sKF_L_integral_algorithm(N, x, d, w0, parameters):
       #print("----------------------------------------------------")
       scalar_var_theta = np.mean(var_theta)
 
-  return {'h': w_hist, 'y': y, 'e': e, 'v': var_theta_hist}
+  return filter_output(y=y, e=e, h=w_hist, v=var_theta_hist)
