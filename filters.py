@@ -727,10 +727,11 @@ def sKF_integral_algorithm(N, x, d, w0, parameters):
 
       theta_parameters = np.void((0, var_tilde), dtype=gaussian_params)
       #base_space = np.arange(-int_range, int_range, dx)
-      base_space = np.arange(int_range[0], int_range[1], dx)
+      lower_bound = int(np.floor(int_range[0]/dx))
+      upper_bound = int(np.ceil(int_range[1]/dx))
+      base_space = np.arange(lower_bound, upper_bound + 1) * dx
+      
       f_eta = gaussian_pdf(base_space, eta_parameters)
-      #prior_m = gaussian_pdf(base_space, theta_parameters)
-      #f_inter_list = np.array(_compute_individual_interferences_pdfs(base_space, gaussian_pdf, theta_parameters, xtemp))
       base_pdf = gaussian_pdf(base_space, theta_parameters)
 
       #print(f"Worst calculated var_zeta: {worst_var_zeta}")
@@ -739,17 +740,16 @@ def sKF_integral_algorithm(N, x, d, w0, parameters):
       #plt.clf()
       for m in range(L):
         zeta_space = base_space + mean_S[m]
-        #theta_m_space = base_space - w[m]
         likelihood_space = d[k] - xtemp[m]*base_space
         freq_scalings = np.abs(xtemp[np.arange(0,L,1) != m])
 
         inter_mask = ~np.zeros((L,), dtype=bool); inter_mask[m] = False
-        #f_zeta = _compute_composite_noise_pdf(f_eta, f_inter_list[~inter_mask], dx)
+        center = -lower_bound
         f_zeta = integral_convolve_from_base_pdf(np.array([f_eta]),
                                                  base_pdf,
                                                  freq_scalings,
                                                  np.zeros((L-1,)),
-                                                 (len(f_eta)+1)//2,
+                                                 center,
                                                  dx)
 
         likelihood = np.interp(likelihood_space, zeta_space, f_zeta, left=0, right=0)
@@ -830,7 +830,9 @@ def sKF_L_integral_algorithm(N, x, d, w0, parameters):
                            mean_S)
 
       theta_parameters = np.void((0, var_tilde), dtype=gaussian_params)
-      base_space = np.arange(int_range[0], int_range[1], dx)
+      lower_bound = int(np.floor(int_range[0]/dx))
+      upper_bound = int(np.ceil(int_range[1]/dx))
+      base_space = np.arange(lower_bound, upper_bound + 1) * dx
       f_eta = laplacian_pdf(base_space, eta_parameters)
       base_pdf = gaussian_pdf(base_space, theta_parameters)
 
@@ -844,11 +846,12 @@ def sKF_L_integral_algorithm(N, x, d, w0, parameters):
         freq_scalings = np.abs(xtemp[np.arange(0,L,1) != m])
 
         inter_mask = ~np.zeros((L,), dtype=bool); inter_mask[m] = False
+        center = -lower_bound
         f_zeta = integral_convolve_from_base_pdf(np.array([f_eta]),
                                                  base_pdf,
                                                  freq_scalings,
                                                  np.zeros((L-1,)),
-                                                 (len(f_eta)+1)//2,
+                                                 center,
                                                  dx)
 
         likelihood = np.interp(likelihood_space, zeta_space, f_zeta, left=0, right=0)
