@@ -74,9 +74,9 @@ def autocorr_matrix_calc(AR, var_v, M = None):
   A[0,:] = -AR[1:]
 
   # Intermediate values associated with the calclulation
-  AA = np.kron(A,A);
+  AA = np.kron(A,A)
   BB_vec_IL = np.zeros((L**2,))  # Effect of the matrix operating over the input data on the state space
-  BB_vec_IL[0] = 1;
+  BB_vec_IL[0] = 1
   I_L2 = np.eye(L**2)
 
   # Calculation of the autocorrelation matrix with the first L values
