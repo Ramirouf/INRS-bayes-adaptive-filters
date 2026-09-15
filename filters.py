@@ -36,6 +36,7 @@ GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
 NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
 LMLS_parameters = namedtuple('LMLS_parameters', ['label', 'mu', 'a'])
 MCC_parameters  = namedtuple('MCC_parameters', ['label', 'mu', 'sigma'])
+RZA_LMS_parameters = namedtuple('RZA_LMS_parameters', ['label', 'mu', 'rho', 'epsilon'])
 
 sKF_parameters = namedtuple('sKF_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0'])
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
@@ -188,6 +189,33 @@ def NLMS_algorithm(N, x, d, h0, parameters):
     if k >= L:
       x_power = delta + np.dot(xtemp, xtemp)
       h += mu*xtemp*e[k]/x_power
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def RZA_LMS_algorithm(N, x, d, h0, parameters):
+  # Reweighted Zero-Attracting LMS (RZA-LMS) Algorithm
+  h = np.copy(h0)
+  mu = parameters.mu
+  rho = parameters.rho
+  epsilon = parameters.epsilon
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      g_x = mu*e[k]
+      g_h = rho/(1 + epsilon*np.abs(h))
+      h += g_x*xtemp - g_h*np.sign(h)
 
   return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
