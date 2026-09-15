@@ -51,7 +51,7 @@ Complex1D = Array(complex128, 1, "C")
 Complex2D = Array(complex128, 2, "C")
 Float1D   = Array(float64, 1, "C")
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def autocorr_matrix_estimate(signal, M = 4):
   # Inicializa as variáveis
   x_temp, R = np.zeros((M, 1)), np.zeros((M, M))
@@ -66,7 +66,7 @@ def autocorr_matrix_estimate(signal, M = 4):
   # Retorna a matriz normalizada pelo tamanho do sinal
   return R/(signal.size)
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def toeplitz(vector):
   L = len(vector)
   matrix = np.zeros((L,L))
@@ -77,7 +77,7 @@ def toeplitz(vector):
 
   return matrix
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def autocorr_matrix_calc(AR, var_v, M = None):
   # Autoregressive order
   L = len(AR) - 1
@@ -118,7 +118,7 @@ def autocorr_matrix_calc(AR, var_v, M = None):
 
   return R
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def AR_settling_time(AR, error = 0.01):
   L = len(AR) - 1
   A = np.zeros((L,L))
@@ -135,7 +135,7 @@ def AR_settling_time(AR, error = 0.01):
   return int(np.ceil(settling_time))
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def shift(new_x_sample, x_window):
   L = len(x_window)
   new_x_window = np.zeros(L)
@@ -143,29 +143,29 @@ def shift(new_x_sample, x_window):
   new_x_window[1:] = x_window[:-1]
   return new_x_window
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def filter(a, b, x):
   K = len(x)
   L_a = len(a)
   L_b = len(b)
-  y_vec = np.zeros(L_a - 1)
-  x_vec = np.zeros(L_b)
+  y_vec = np.zeros(L_a - 1, dtype=np.float64)
+  x_vec = np.zeros(L_b, dtype=np.float64)
   if a[0] != 0.0:
-    b = b/a[0]
-    a = a[1:]/a[0]
+    b = np.ascontiguousarray(b/a[0])
+    a = np.ascontiguousarray(a[1:]/a[0])
   else:
     raise(Exception('a[0] can NOT be zero!'))
-  y = np.zeros(K)
+  y = np.zeros(K, dtype=np.float64)
 
   for k in range(K):
     x_vec = shift(x[k], x_vec)
 
-    y[k] = b @ x_vec - a @ y_vec
+    y[k] = np.dot(b, x_vec) - np.dot(a, y_vec)
     y_vec = shift(y[k], y_vec)
 
   return y
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def NLMS_algorithm(N, x, d, h0, parameters):
   h = h0
   mu = parameters.mu
@@ -189,7 +189,7 @@ def NLMS_algorithm(N, x, d, h0, parameters):
 
   return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def GMVC_algorithm(N, x, d, h0, params):
     # Generalized Maximum Versoria Correntropy Algorithm
     h = h0
@@ -426,8 +426,8 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
 
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
-@njit(cache=True)
-def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True, var_x: float = 1.0):
+@njit(cache=True, nogil=True)
+def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True, var_x: np.float64 = 1.0):
     # Determine the input signal x through a AR process
     settling_time = AR_settling_time(AR, error = 0.001)*warm_up
     x = np.random.randn(N + settling_time)
@@ -440,7 +440,7 @@ def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool 
     
     return x
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
     # AR process order and filter length
     L = len(params.ho)
@@ -457,7 +457,7 @@ def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = Tr
 
     return params.ho, {'x': x, 'v': v, 'd': d}
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool = True):
     # AR process order and filter length
     L = len(params.ho)
@@ -474,7 +474,7 @@ def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool
 
     return params.ho, {'x': x, 'v': v, 'd': d}
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compute_MSD(h_hist, ho):
     if ho.ndim == 1:
         normalization_factor = np.dot(ho, ho)
@@ -498,7 +498,8 @@ def MC_Simulations(N,
                    Algorithms,
                    Parameters,
                    h0,
-                   PBar = None):
+                   PBar = None,
+                   external_avg = False):
     L = len(h0)
     N_Algorithms = len(Algorithms)
     measure_init = lambda taps, N_iter: {'h': np.zeros((N_iter, taps)),
@@ -523,19 +524,22 @@ def MC_Simulations(N,
             measures[label]['Jex'] += (algorithm_signals.e - signals['v'])**2
             measures[label]['MSD'] += _compute_MSD(algorithm_signals.h, ho)
             measures[label]['var'] += algorithm_signals.v
-  
-        if not PBar is None:
+
+        if PBar == "":
+          pass
+        elif not PBar is None:
             PBar.update(1)
         else:
             print(f'Realization {k} out of {NR}')
     
-    for k in range(N_Algorithms):
-        label = Parameters[k].label
-        measures[label]['h'] /= NR
-        measures[label]['J'] /= NR
-        measures[label]['Jex'] /= NR
-        measures[label]['var'] /= NR
-        measures[label]['MSD'] /= NR
+    if not external_avg:
+      for k in range(N_Algorithms):
+          label = Parameters[k].label
+          measures[label]['h'] /= NR
+          measures[label]['J'] /= NR
+          measures[label]['Jex'] /= NR
+          measures[label]['var'] /= NR
+          measures[label]['MSD'] /= NR
   
     return measures
 
@@ -546,15 +550,15 @@ laplacian_params = np.dtype([("mean", "f8"),
 
 _float_array_1d = types.float64[:]
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def gaussian_pdf(x, params: gaussian_params):
   return (1/np.sqrt(2*np.pi*params.variance))*np.exp(-(x-params.mean)**2/(2*params.variance))
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def laplacian_pdf(x, params: laplacian_params):
   return (1/(2*params.b))*np.exp(-np.abs(x-params.mean)/params.b)
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compute_individual_interferences_pdfs(base_space, theta_pdf_function, pdf_parameters, input_data, regularization = 1e-15):
   f_inter_list = []
   for x in input_data:
@@ -564,7 +568,7 @@ def _compute_individual_interferences_pdfs(base_space, theta_pdf_function, pdf_p
 
   return f_inter_list
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def fft_integral_convolve(f, g, dx):
     """
     Computes the numerical convolution integral using the FFT.
@@ -585,7 +589,7 @@ def fft_integral_convolve(f, g, dx):
 
     return dx * riemann_sum[input_len//2:3*input_len//2]
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def integral_convolve_from_base_pdf(full_signals,
                                     base_signal,
                                     freq_scalings,
@@ -654,7 +658,7 @@ def integral_convolve_from_base_pdf(full_signals,
 
     return y_full[start_idx:end_idx]*(dx ** (K - 1))
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compute_composite_noise_pdf(f_eta, f_inter_list, dx):
   f_zeta = f_eta
   for f_inter in f_inter_list:
