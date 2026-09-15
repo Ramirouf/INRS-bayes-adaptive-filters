@@ -34,6 +34,8 @@ from numpy.typing import NDArray
 
 GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
 NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
+LMLS_parameters = namedtuple('LMLS_parameters', ['label', 'mu', 'a'])
+MCC_parameters  = namedtuple('MCC_parameters', ['label', 'mu', 'sigma'])
 
 sKF_parameters = namedtuple('sKF_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0'])
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
@@ -167,7 +169,7 @@ def filter(a, b, x):
 
 @njit(cache=True, nogil=True)
 def NLMS_algorithm(N, x, d, h0, parameters):
-  h = h0
+  h = np.copy(h0)
   mu = parameters.mu
   delta = parameters.delta
 
@@ -180,19 +182,68 @@ def NLMS_algorithm(N, x, d, h0, parameters):
   for k in range(0,N):
     h_hist[k] = h
     xtemp = shift(x[k], xtemp)
-    y[k] = h @ xtemp
+    y[k] = np.dot(h, xtemp)
     e[k] = d[k] - y[k]
 
     if k >= L:
-      x_power = delta + xtemp @ xtemp
-      h = h + mu*xtemp*e[k]/x_power
+      x_power = delta + np.dot(xtemp, xtemp)
+      h += mu*xtemp*e[k]/x_power
 
-  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def MCC_algorithm(N, x, d, h0, parameters):
+  # Maximum Correntropy Criterion (MCC) Algorithm
+  h = np.copy(h0)
+  mu = parameters.mu
+  sigma = parameters.sigma
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      g = mu*np.exp(-(e[k]**2)/sigma)*e[k]
+      h += g*xtemp
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def LMLS_algorithm(N, x, d, h0, parameters):
+  #Least Mean Logarithmic Square (LMLS)
+  h = np.copy(h0)
+  mu = parameters.mu
+  a = parameters.a
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      h += xtemp*(mu*e[k]/(1 + a * (e[k]**2)))
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
 @njit(cache=True, nogil=True)
 def GMVC_algorithm(N, x, d, h0, params):
     # Generalized Maximum Versoria Correntropy Algorithm
-    h = h0
+    h = np.copy(h0)
     mu = params.mu
     tau = params.tau
     p = params.p
@@ -206,7 +257,7 @@ def GMVC_algorithm(N, x, d, h0, params):
     for k in range(0,N):
         h_hist[k] = h
         xtemp = shift(x[k], xtemp)
-        y[k] = h @ xtemp
+        y[k] = np.dot(h, xtemp)
         e[k] = d[k] - y[k]
     
         if k >= L:
@@ -217,9 +268,9 @@ def GMVC_algorithm(N, x, d, h0, params):
             else:
                 raise ValueError("Parameter p must be greater than or equal to 1")
             g = mu*np.sign(e[k])*power_e/((1 + tau*power_e*np.abs(e[k]))**2)
-            h = h + g*xtemp
+            h += g*xtemp
     
-    return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
+    return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
 def sKF_algorithm(N, x, d, h0, parameters):
   h = h0
@@ -238,7 +289,7 @@ def sKF_algorithm(N, x, d, h0, parameters):
   # y: salida estimada
   for k in range(0,N):
     xtemp = shift(x[k], xtemp)
-    y[k] = h @ xtemp
+    y[k] = np.dot(h, xtemp)
     e[k] = d[k] - y[k]
     h_hist[k] = h
     v_hist[k] = v
@@ -276,7 +327,7 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
     # y: salida estimada
     for k in range(0,N):
         xtemp = shift(x[k], xtemp)
-        y[k] = h @ xtemp
+        y[k] = np.dot(h, xtemp)
         e[k] = d[k] - y[k]
         h_hist[k] = h
         v_hist[k] = v
@@ -285,7 +336,7 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
             # predict
             v += epsilon
             # update
-            norm = xtemp @ xtemp
+            norm = np.dot(xtemp, xtemp)
             s = b_eta * abs(e[k]) + v * norm
             h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
             v = v * (1 - (v * norm) / (L * s)) 
