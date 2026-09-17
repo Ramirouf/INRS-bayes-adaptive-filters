@@ -29,6 +29,7 @@ from matplotlib import pyplot as plt
 from numba.types import Array, complex128, float64
 from scipy.special import log_ndtr, logsumexp
 from collections import namedtuple
+from numba_stats import norm as nb_norm
 
 from numpy.typing import NDArray
 
@@ -425,7 +426,7 @@ Depends only on numpy and scipy.
 # notebook's own shift(), which is @njit and is called from compiled filters.
 _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma = -1
 
-@njit(cache=True, nogil=True)
+#njit(cache=True, nogil=True)
 def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     """sKF-L (exact), Section 5 of the draft. See the module docstring."""
     h = h0
@@ -480,9 +481,12 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             # this filter is supposed to earn its keep. log_ndtr is accurate deep
             # into the left tail, and logsumexp normalizes without ever forming the
             # individual factors. Same reason the Mills ratio goes through logs.
+            
             log_Phi = log_ndtr(kappa)
+            #log_Phi = nb_norm.logcdf(kappa, 0.0, 1.0)
             log_pi = -_SIGN * e[k] / b_eta + log_Phi
             pi = np.exp(log_pi - logsumexp(log_pi))  # mixture weights, sum to 1
+            #pi = np.exp(log_pi - np.logaddexp.reduce(log_pi))  # mixture weights, sum to 1
 
             log_phi = -0.5 * kappa**2 - 0.5 * np.log(2 * np.pi)
             mills = np.exp(log_phi - log_Phi)  # phi(kappa)/Phi(kappa)
