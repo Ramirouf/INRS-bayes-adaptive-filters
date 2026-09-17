@@ -300,6 +300,7 @@ def GMVC_algorithm(N, x, d, h0, params):
     
     return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
+@njit(cache=True, nogil=True)
 def sKF_algorithm(N, x, d, h0, parameters):
   h = h0
   epsilon = parameters.epsilon
@@ -334,6 +335,7 @@ def sKF_algorithm(N, x, d, h0, parameters):
   
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
+@njit(cache=True, nogil=True)
 def sKF_L_algorithm(N, x, d, h0, parameters):
     h = h0
     epsilon = parameters.epsilon
@@ -423,7 +425,7 @@ Depends only on numpy and scipy.
 # notebook's own shift(), which is @njit and is called from compiled filters.
 _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma = -1
 
-
+@njit(cache=True, nogil=True)
 def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     """sKF-L (exact), Section 5 of the draft. See the module docstring."""
     h = h0
