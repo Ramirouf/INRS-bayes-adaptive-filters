@@ -22,7 +22,8 @@ import numpy as np
 import scipy.signal
 import scipy
 import numba
-from numba import njit, prange, objmode, types
+import math
+from numba import njit, prange, objmode, types, vectorize
 from typing import List, Optional, Any, AnyStr, TypedDict
 from collections.abc import Callable
 from matplotlib import pyplot as plt
@@ -54,6 +55,86 @@ laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scal
 Complex1D = Array(complex128, 1, "C")
 Complex2D = Array(complex128, 2, "C")
 Float1D   = Array(float64, 1, "C")
+
+@njit
+def log_ndtr_scalar(x):
+    # 1. Handle NaNs immediately (using Numba-safe check)
+    if x != x:
+        return np.nan
+    
+    # 2. Large positive values (x > 5.0):
+    # Avoid precision loss near 1.0 using log1p
+    if x > 5.0:
+        return np.log1p(-0.5 * math.erfc(x * 0.7071067811865476))
+    
+    # 3. Intermediate values (-10.0 <= x <= 5.0):
+    # Safe to compute directly with erfc without underflow or expansion breakdown
+    if x >= -10.0:
+        return math.log(0.5 * math.erfc(-x * 0.7071067811865476))
+    
+    # 4. Deep negative values (x < -10.0):
+    # Use asymptotic expansion to prevent underflow to -inf
+    z = -x * 0.7071067811865476
+    z2 = z * z
+    
+    # Asymptotic expansion series
+    sum_terms = 1.0 - 1.0 / (2.0 * z2) + 3.0 / (4.0 * z2 * z2) - 15.0 / (8.0 * z2 * z2 * z2)
+    
+    # Fixed: Added -math.log(2.0) to correctly scale erfc into ndtr
+    return -z2 - math.log(z) - 0.5 * math.log(math.pi) + math.log(sum_terms) - math.log(2.0)
+
+@vectorize(["float64(float64)"], nopython=True)
+def log_ndtr(x):
+    return log_ndtr_scalar(x)
+
+
+# Element-wise array wrapper using Numba Vectorize
+@vectorize(["float64(float64)"], nopython=True)
+def log_ndtr(x):
+    return log_ndtr_scalar(x)
+
+
+# Element-wise array wrapper using Numba Vectorize
+@vectorize(["float64(float64)"], nopython=True)
+def nb_log_ndtr(x):
+    return log_ndtr_scalar(x)
+
+@njit(cache=True)
+def nb_logsumexp_1d(x):
+    """
+    Numerically stable logsumexp for 1D arrays, fully Numba-compatible.
+    Equivalent to scipy.special.logsumexp(x).
+    """
+    x = np.reshape(x, (-1,))
+    #print(f"x: {x}")
+    n = len(x)
+    if n == 0:
+        return -np.inf
+    
+    # 1. Find the maximum element safely handling NaNs and Infs
+    # We initialize with the first element
+    c = x[0]
+    for i in range(1, n):
+        val = x[i]
+        if val != val:    # the same as math.isnan(val):
+            return np.nan
+        # If c is -inf, overwrite it with any larger number
+        if val > c or (c == -np.inf):
+            c = val
+
+    # 2. Handle strict edge cases where max is ±infinity
+    if np.abs(c) == np.inf:
+        if c > 0:
+            return np.inf  # log(inf + ...) = inf
+        return -np.inf # log(0) = -inf
+
+    # 3. Compute the shifted sum of exponentials
+    sum_exp = 0.0
+    for i in range(n):
+        sum_exp += np.exp(x[i] - c)
+        
+    # 4. Return the stabilized result
+    return c + np.log(sum_exp)
 
 @njit(cache=True, nogil=True)
 def autocorr_matrix_estimate(signal, M = 4):
@@ -426,7 +507,7 @@ Depends only on numpy and scipy.
 # notebook's own shift(), which is @njit and is called from compiled filters.
 _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma = -1
 
-#njit(cache=True, nogil=True)
+@njit(cache=True, nogil=True)
 def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     """sKF-L (exact), Section 5 of the draft. See the module docstring."""
     h = h0
@@ -482,11 +563,9 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             # into the left tail, and logsumexp normalizes without ever forming the
             # individual factors. Same reason the Mills ratio goes through logs.
             
-            log_Phi = log_ndtr(kappa)
-            #log_Phi = nb_norm.logcdf(kappa, 0.0, 1.0)
+            log_Phi = nb_log_ndtr(kappa)
             log_pi = -_SIGN * e[k] / b_eta + log_Phi
-            pi = np.exp(log_pi - logsumexp(log_pi))  # mixture weights, sum to 1
-            #pi = np.exp(log_pi - np.logaddexp.reduce(log_pi))  # mixture weights, sum to 1
+            pi = np.exp(log_pi - nb_logsumexp_1d(log_pi))  # mixture weights, sum to 1
 
             log_phi = -0.5 * kappa**2 - 0.5 * np.log(2 * np.pi)
             mills = np.exp(log_phi - log_Phi)  # phi(kappa)/Phi(kappa)
