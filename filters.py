@@ -41,6 +41,7 @@ MCC_parameters  = namedtuple('MCC_parameters', ['label', 'mu', 'sigma'])
 RZA_LMS_parameters = namedtuple('RZA_LMS_parameters', ['label', 'mu', 'rho', 'epsilon'])
 
 sKF_parameters = namedtuple('sKF_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0'])
+AWU_sKF_parameters = namedtuple('AWU_sKF_parameters', ['label', 'epsilon_0', 'var_eta', 'v_tilde_0'])
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 
 sKF_L_parameters = namedtuple('sKF_L_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0'])
@@ -414,7 +415,46 @@ def sKF_algorithm(N, x, d, h0, parameters):
       h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
       v = v * (1 - (v * norm) / (L * s)) 
 
-  
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def AWU_sKF_algorithm(N, x, d, h0, parameters):
+  # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
+  h = np.copy(h0)
+  epsilon = np.copy(parameters.epsilon_0)
+  var_eta = np.copy(parameters.var_eta)
+  v_tilde_0 = np.copy(parameters.v_tilde_0)
+
+  L = len(h)
+  float_L = np.float64(L)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  v=v_tilde_0
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  # d: salida del sistema con ruido
+  # y: salida estimada
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # predict
+      norm = np.dot(xtemp, xtemp)
+      #J_hat = (var_eta + epsilon*norm)
+      # epsilon *= (1.0 + epsilon*(e[k]**2 - J_hat)*norm/(float_L*(J_hat**2)))
+      #v += epsilon
+      J_hat = (var_eta + v*norm)
+      v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat**2)))
+      # update
+      s = var_eta + v * norm
+      h += xtemp * (v * e[k]/s)
+      v *= (1.0 - (v * norm) / (float_L * s)) 
+
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
