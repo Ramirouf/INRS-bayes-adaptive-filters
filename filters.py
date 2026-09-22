@@ -50,6 +50,7 @@ sKF_L_int_parameters = namedtuple('sKF_L_int_parameters', ['label', 'epsilon', '
 filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 
 std_env_parameters = namedtuple('std_env_parameters', ['ho', 'AR','var_v','var_x'])
+sys_inversion_gaussian_env_parameters = namedtuple('sys_inversion_gaussian_env_parameters', ['ho', 'AR', 'var_v', 'var_x'])
 laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
 
 # Tipos de array estáticos exigidos pelo objmode
@@ -660,6 +661,29 @@ def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = Tr
     x = x[L:N+L]
 
     return params.ho, {'x': x, 'v': v, 'd': d}
+  
+@njit(cache=True, nogil=True)
+def sys_inversion_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = np.sqrt(params.var_v)*np.random.randn(N)
+
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up, var_x = params.var_x)
+
+    # Determine the desired signal
+    d = np.zeros((N,), dtype=np.float64)
+    d[:N//2] = v[:N//2] + np.convolve(params.ho, x[:N//2+L], mode = 'full')[L-1:N//2+L-1]
+    d[N//2:] = v[N//2:] + np.convolve(-params.ho, x[N//2:], mode = 'full')[L-1:N//2+L-1]
+    
+    # ho through time
+    first_half = np.zeros((N//2, params.ho.shape[0]), dtype=params.ho.dtype) + params.ho[np.newaxis, :]
+    second_half = np.zeros(((N+1)//2, params.ho.shape[0]), dtype=params.ho.dtype) - params.ho[np.newaxis, :]
+    h_hist = np.vstack((first_half, second_half))
+
+    return h_hist, {'x': x[L-1:N+L-1], 'v': v, 'd': d}
 
 @njit(cache=True, nogil=True)
 def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool = True):
@@ -683,7 +707,7 @@ def _compute_MSD(h_hist, ho):
     if ho.ndim == 1:
         normalization_factor = np.dot(ho, ho)
     else:
-        normalization_factor = np.diag(ho @ ho.T)
+        normalization_factor = np.array([np.dot(ho[i,:], ho[i,:]) for i in range(ho.shape[0])])
     h_error = h_hist - ho
     
     MSD = np.zeros(h_error.shape[0])
