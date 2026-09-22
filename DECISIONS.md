@@ -238,3 +238,27 @@
   about the filter. Under the scale the new draft uses, it holds only below about 20 dB SNR. This is
   worth putting to Leszek with the table, since it changes what Section 6 concludes.
 - Still to do under the new convention: Ignacio's notebooks 05 and 07.
+
+## 2026-09-22 - Math notation in notebook markdown cells
+
+**Decided**
+- Notebook markdown writes vectors and matrices out in full, `\boldsymbol{x}`, `\boldsymbol{\Sigma}`,
+  matching `gain-functions.ipynb`. The draft's preamble shorthands (`\bx`, `\bw`, `\bh`, `\bSigma`,
+  `\bI`, `\bR`, `\btheta`, `\bzero`) are not used in notebooks. Applied to `vkf-kf.ipynb` (18 broken
+  spans) and `convergence-gap.ipynb` (10), which had been written in the draft's notation.
+- Accents take an explicit group: `\tilde{\boldsymbol{\Sigma}}`, not `\tilde\boldsymbol{\Sigma}`.
+- Also unescaped the doubled backslashes in cell 0 of `03_escenario_realista_mad.ipynb` and
+  `04_escenario_realista_large_k_mad.ipynb` (`$b_\\eta$` -> `$b_\eta$`), 8 per file.
+
+**Why**
+- Notebook markdown is rendered by KaTeX, which has no access to the LaTeX preamble, so every one of
+  those macros rendered as red "Undefined control sequence" text in VSCode, GitHub and nbviewer.
+- KaTeX gives `\tilde` only the next single token, so it swallows `\boldsymbol` and then fails on the
+  missing argument. LaTeX expands the macro first, which is why `\tilde\bSigma` is fine in the .tex
+  and its expansion is not.
+
+**Rejected**
+- Defining the macros in a `\newcommand` block per notebook: KaTeX's macro table is not reliably
+  shared across notebook cells, so the definitions would have to be repeated in every cell.
+- `.vscode/settings.json` with `markdown.math.macros`: editor-only, so the math would still break on
+  GitHub and nbviewer, and that setting is documented for the markdown preview, not for notebooks.
