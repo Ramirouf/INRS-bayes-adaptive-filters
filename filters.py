@@ -142,7 +142,7 @@ def shift(new_x_sample, x_window):
   new_x_window = np.zeros(L)
   new_x_window[0] = new_x_sample
   new_x_window[1:] = x_window[:-1]
-  return new_x_window
+  return np.ascontiguousarray(new_x_window)
 
 @njit(cache=True, nogil=True)
 def filter(a, b, x):
@@ -152,8 +152,8 @@ def filter(a, b, x):
   y_vec = np.zeros(L_a - 1, dtype=np.float64)
   x_vec = np.zeros(L_b, dtype=np.float64)
   if a[0] != 0.0:
-    b = np.ascontiguousarray(b/a[0])
-    a = np.ascontiguousarray(a[1:]/a[0])
+    b_cont = np.ascontiguousarray(b/a[0])
+    a_cont = np.ascontiguousarray(a[1:]/a[0])
   else:
     raise(Exception('a[0] can NOT be zero!'))
   y = np.zeros(K, dtype=np.float64)
@@ -161,7 +161,7 @@ def filter(a, b, x):
   for k in range(K):
     x_vec = shift(x[k], x_vec)
 
-    y[k] = np.dot(b, x_vec) - np.dot(a, y_vec)
+    y[k] = np.dot(b_cont, x_vec) - np.dot(a_cont, y_vec)
     y_vec = shift(y[k], y_vec)
 
   return y
