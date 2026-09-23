@@ -97,7 +97,9 @@ def autocorr_matrix_calc(AR, var_v, M = None):
 
   # Intermediate values associated with the calclulation
   AA = np.kron(A,A)
+  AA = np.kron(A,A)
   BB_vec_IL = np.zeros((L**2,))  # Effect of the matrix operating over the input data on the state space
+  BB_vec_IL[0] = 1
   BB_vec_IL[0] = 1
   I_L2 = np.eye(L**2)
 
@@ -177,8 +179,10 @@ def NLMS_algorithm(N, x, d, h0, parameters):
   e = np.zeros((N,))
   xtemp = np.zeros(L)
   h_hist = np.zeros((N, L))
+  h_hist = np.zeros((N, L))
 
   for k in range(0,N):
+    h_hist[k] = h
     h_hist[k] = h
     xtemp = shift(x[k], xtemp)
     y[k] = h @ xtemp
@@ -255,9 +259,14 @@ def sKF_algorithm(N, x, d, h0, parameters):
 
   
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+  
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 def sKF_L_algorithm(N, x, d, h0, parameters):
     h = h0
+    epsilon = parameters.epsilon
+    b_eta = parameters.b_eta
+    v_tilde_0 = parameters.v_tilde_0  
     epsilon = parameters.epsilon
     b_eta = parameters.b_eta
     v_tilde_0 = parameters.v_tilde_0  
@@ -291,6 +300,7 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
             h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
             v = v * (1 - (v * norm) / (L * s)) 
 
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 """Exact scalar-variance filter for a Gaussian prior with a Laplacian likelihood.
@@ -349,6 +359,9 @@ _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma 
 def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     """sKF-L (exact), Section 5 of the draft. See the module docstring."""
     h = h0
+    epsilon = parameters.epsilon
+    b_eta = parameters.b_eta
+    v_tilde_0 = parameters.v_tilde_0
     epsilon = parameters.epsilon
     b_eta = parameters.b_eta
     v_tilde_0 = parameters.v_tilde_0
@@ -426,6 +439,7 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             v = v_tilde + D * norm / L
 
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
 def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True, var_x: np.float64 = 1.0):
@@ -472,7 +486,11 @@ def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool
     # Determine the desired signal
     d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
     x = x[L:N+L]
+    # Determine the desired signal
+    d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
+    x = x[L:N+L]
 
+    return params.ho, {'x': x, 'v': v, 'd': d}
     return params.ho, {'x': x, 'v': v, 'd': d}
 
 @njit(cache=True, nogil=True)
