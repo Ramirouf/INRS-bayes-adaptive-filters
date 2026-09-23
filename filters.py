@@ -22,6 +22,8 @@ import numpy as np
 import scipy.signal
 import scipy
 import numba
+import dask
+from dask.diagnostics import ProgressBar as dask_PB
 from numba import njit, prange, objmode, types
 from typing import List, Optional, Any, AnyStr, TypedDict
 from collections.abc import Callable
@@ -51,7 +53,7 @@ Complex1D = Array(complex128, 1, "C")
 Complex2D = Array(complex128, 2, "C")
 Float1D   = Array(float64, 1, "C")
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def autocorr_matrix_estimate(signal, M = 4):
   # Inicializa as variáveis
   x_temp, R = np.zeros((M, 1)), np.zeros((M, M))
@@ -66,7 +68,7 @@ def autocorr_matrix_estimate(signal, M = 4):
   # Retorna a matriz normalizada pelo tamanho do sinal
   return R/(signal.size)
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def toeplitz(vector):
   L = len(vector)
   matrix = np.zeros((L,L))
@@ -77,7 +79,7 @@ def toeplitz(vector):
 
   return matrix
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def autocorr_matrix_calc(AR, var_v, M = None):
   # Autoregressive order
   L = len(AR) - 1
@@ -95,7 +97,9 @@ def autocorr_matrix_calc(AR, var_v, M = None):
 
   # Intermediate values associated with the calclulation
   AA = np.kron(A,A)
+  AA = np.kron(A,A)
   BB_vec_IL = np.zeros((L**2,))  # Effect of the matrix operating over the input data on the state space
+  BB_vec_IL[0] = 1
   BB_vec_IL[0] = 1
   I_L2 = np.eye(L**2)
 
@@ -118,7 +122,7 @@ def autocorr_matrix_calc(AR, var_v, M = None):
 
   return R
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def AR_settling_time(AR, error = 0.01):
   L = len(AR) - 1
   A = np.zeros((L,L))
@@ -134,38 +138,37 @@ def AR_settling_time(AR, error = 0.01):
   settling_time = np.log(error)/np.log(slowest_decay_ratio)
   return int(np.ceil(settling_time))
 
-
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def shift(new_x_sample, x_window):
   L = len(x_window)
   new_x_window = np.zeros(L)
   new_x_window[0] = new_x_sample
   new_x_window[1:] = x_window[:-1]
-  return new_x_window
+  return np.ascontiguousarray(new_x_window)
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def filter(a, b, x):
   K = len(x)
   L_a = len(a)
   L_b = len(b)
-  y_vec = np.zeros(L_a - 1)
-  x_vec = np.zeros(L_b)
+  y_vec = np.zeros(L_a - 1, dtype=np.float64)
+  x_vec = np.zeros(L_b, dtype=np.float64)
   if a[0] != 0.0:
-    b = b/a[0]
-    a = a[1:]/a[0]
+    b_cont = np.ascontiguousarray(b/a[0])
+    a_cont = np.ascontiguousarray(a[1:]/a[0])
   else:
     raise(Exception('a[0] can NOT be zero!'))
-  y = np.zeros(K)
+  y = np.zeros(K, dtype=np.float64)
 
   for k in range(K):
     x_vec = shift(x[k], x_vec)
 
-    y[k] = b @ x_vec - a @ y_vec
+    y[k] = np.dot(b_cont, x_vec) - np.dot(a_cont, y_vec)
     y_vec = shift(y[k], y_vec)
 
   return y
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def NLMS_algorithm(N, x, d, h0, parameters):
   h = h0
   mu = parameters.mu
@@ -176,8 +179,10 @@ def NLMS_algorithm(N, x, d, h0, parameters):
   e = np.zeros((N,))
   xtemp = np.zeros(L)
   h_hist = np.zeros((N, L))
+  h_hist = np.zeros((N, L))
 
   for k in range(0,N):
+    h_hist[k] = h
     h_hist[k] = h
     xtemp = shift(x[k], xtemp)
     y[k] = h @ xtemp
@@ -189,7 +194,7 @@ def NLMS_algorithm(N, x, d, h0, parameters):
 
   return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L)))
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def GMVC_algorithm(N, x, d, h0, params):
     # Generalized Maximum Versoria Correntropy Algorithm
     h = h0
@@ -254,9 +259,14 @@ def sKF_algorithm(N, x, d, h0, parameters):
 
   
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+  
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 def sKF_L_algorithm(N, x, d, h0, parameters):
     h = h0
+    epsilon = parameters.epsilon
+    b_eta = parameters.b_eta
+    v_tilde_0 = parameters.v_tilde_0  
     epsilon = parameters.epsilon
     b_eta = parameters.b_eta
     v_tilde_0 = parameters.v_tilde_0  
@@ -290,6 +300,7 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
             h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
             v = v * (1 - (v * norm) / (L * s)) 
 
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 """Exact scalar-variance filter for a Gaussian prior with a Laplacian likelihood.
@@ -348,6 +359,9 @@ _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma 
 def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     """sKF-L (exact), Section 5 of the draft. See the module docstring."""
     h = h0
+    epsilon = parameters.epsilon
+    b_eta = parameters.b_eta
+    v_tilde_0 = parameters.v_tilde_0
     epsilon = parameters.epsilon
     b_eta = parameters.b_eta
     v_tilde_0 = parameters.v_tilde_0
@@ -425,9 +439,10 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             v = v_tilde + D * norm / L
 
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
-@njit(cache=True)
-def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True, var_x: float = 1.0):
+@njit(cache=True, nogil=True)
+def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True, var_x: np.float64 = 1.0):
     # Determine the input signal x through a AR process
     settling_time = AR_settling_time(AR, error = 0.001)*warm_up
     x = np.random.randn(N + settling_time)
@@ -440,7 +455,7 @@ def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool 
     
     return x
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
     # AR process order and filter length
     L = len(params.ho)
@@ -457,7 +472,7 @@ def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = Tr
 
     return params.ho, {'x': x, 'v': v, 'd': d}
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool = True):
     # AR process order and filter length
     L = len(params.ho)
@@ -471,15 +486,19 @@ def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool
     # Determine the desired signal
     d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
     x = x[L:N+L]
+    # Determine the desired signal
+    d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
+    x = x[L:N+L]
 
     return params.ho, {'x': x, 'v': v, 'd': d}
+    return params.ho, {'x': x, 'v': v, 'd': d}
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compute_MSD(h_hist, ho):
     if ho.ndim == 1:
         normalization_factor = np.dot(ho, ho)
     else:
-        normalization_factor = np.diag(ho @ ho.T)
+        normalization_factor = np.array([np.dot(ho[i,:], ho[i,:]) for i in range(ho.shape[0])])
     h_error = h_hist - ho
     
     MSD = np.zeros(h_error.shape[0])
@@ -498,7 +517,8 @@ def MC_Simulations(N,
                    Algorithms,
                    Parameters,
                    h0,
-                   PBar = None):
+                   PBar = None,
+                   external_avg = False):
     L = len(h0)
     N_Algorithms = len(Algorithms)
     measure_init = lambda taps, N_iter: {'h': np.zeros((N_iter, taps)),
@@ -523,12 +543,78 @@ def MC_Simulations(N,
             measures[label]['Jex'] += (algorithm_signals.e - signals['v'])**2
             measures[label]['MSD'] += _compute_MSD(algorithm_signals.h, ho)
             measures[label]['var'] += algorithm_signals.v
-  
-        if not PBar is None:
+
+        if PBar == "":
+          pass
+        elif not PBar is None:
             PBar.update(1)
         else:
             print(f'Realization {k} out of {NR}')
     
+    if not external_avg:
+      for k in range(N_Algorithms):
+          label = Parameters[k].label
+          measures[label]['h'] /= NR
+          measures[label]['J'] /= NR
+          measures[label]['Jex'] /= NR
+          measures[label]['var'] /= NR
+          measures[label]['MSD'] /= NR
+  
+    return measures
+
+def sum_measures(measures_a, measures_b):
+    summed_measures = {}
+    for label in measures_a:
+        summed_measures[label] = {}
+        for key in measures_a[label]:
+            summed_measures[label][key] = measures_a[label][key] + measures_b[label][key]
+    return summed_measures
+
+delayed_chunked_iterations = dask.delayed(MC_Simulations)
+delayed_sum = dask.delayed(sum_measures)
+
+def create_tasks_tree(tasks):
+    while len(tasks) > 1:
+        next_stage = []
+        for i in range(0, len(tasks), 2):
+            if i + 1 < len(tasks):
+                combined = delayed_sum(tasks[i], tasks[i+1])
+                next_stage.append(combined)
+            else:
+                next_stage.append(tasks[i])
+        tasks = next_stage
+    return tasks[0]
+
+def dask_MC_Simulations(N, 
+                        NR,
+                        environment_parameters,
+                        environment,
+                        Algorithms,
+                        Parameters,
+                        h0,
+                        num_workers = 1,
+                        num_chunks = None):
+    L = len(h0)
+    N_Algorithms = len(Algorithms)
+    if num_chunks is None:
+        num_chunks = num_workers
+
+    rest_of_realizations = NR % num_chunks
+    tasks = [delayed_chunked_iterations(
+        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True
+    ) for _ in range(num_chunks)]
+    
+    if rest_of_realizations > 0:
+        tasks.append(delayed_chunked_iterations(
+            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True
+        ))
+    
+    tasks_tree = create_tasks_tree(tasks)
+    tasks_tree.visualize()
+
+    with dask_PB():
+        measures = dask.compute(tasks_tree, num_workers=num_workers)[0]
+
     for k in range(N_Algorithms):
         label = Parameters[k].label
         measures[label]['h'] /= NR
@@ -536,7 +622,7 @@ def MC_Simulations(N,
         measures[label]['Jex'] /= NR
         measures[label]['var'] /= NR
         measures[label]['MSD'] /= NR
-  
+
     return measures
 
 gaussian_params = np.dtype([("mean", "f8"),
@@ -546,15 +632,15 @@ laplacian_params = np.dtype([("mean", "f8"),
 
 _float_array_1d = types.float64[:]
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def gaussian_pdf(x, params: gaussian_params):
   return (1/np.sqrt(2*np.pi*params.variance))*np.exp(-(x-params.mean)**2/(2*params.variance))
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def laplacian_pdf(x, params: laplacian_params):
   return (1/(2*params.b))*np.exp(-np.abs(x-params.mean)/params.b)
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compute_individual_interferences_pdfs(base_space, theta_pdf_function, pdf_parameters, input_data, regularization = 1e-15):
   f_inter_list = []
   for x in input_data:
@@ -564,7 +650,7 @@ def _compute_individual_interferences_pdfs(base_space, theta_pdf_function, pdf_p
 
   return f_inter_list
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def fft_integral_convolve(f, g, dx):
     """
     Computes the numerical convolution integral using the FFT.
@@ -585,7 +671,7 @@ def fft_integral_convolve(f, g, dx):
 
     return dx * riemann_sum[input_len//2:3*input_len//2]
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def integral_convolve_from_base_pdf(full_signals,
                                     base_signal,
                                     freq_scalings,
@@ -654,7 +740,7 @@ def integral_convolve_from_base_pdf(full_signals,
 
     return y_full[start_idx:end_idx]*(dx ** (K - 1))
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _compute_composite_noise_pdf(f_eta, f_inter_list, dx):
   f_zeta = f_eta
   for f_inter in f_inter_list:
