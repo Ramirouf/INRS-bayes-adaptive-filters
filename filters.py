@@ -479,7 +479,7 @@ def _compute_MSD(h_hist, ho):
     if ho.ndim == 1:
         normalization_factor = np.dot(ho, ho)
     else:
-        normalization_factor = np.diag(ho @ ho.T)
+        normalization_factor = np.array([np.dot(ho[i,:], ho[i,:]) for i in range(ho.shape[0])])
     h_error = h_hist - ho
     
     MSD = np.zeros(h_error.shape[0])
