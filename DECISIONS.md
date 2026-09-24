@@ -374,3 +374,140 @@
   `sims/sep18/ggb_summary_ar0.0.json` fLe / fLm 936 / 947 = 0.99. The 0 dB row of Ignacio's SNR sweep,
   1431 / 1419, matches this notebook's white M = 128 run (1432 / 1419) to within one step.
 - Run time 175 s (was 102 s).
+
+## 2026-09-24 - The matched sKF with chi' clipped at zero (`clipped-matched.ipynb`, issue #8)
+
+**Decided**
+- Test whether the variance inflation from negative chi' is why the matched sKF of notebook 09 recovers
+  faster: the same filter with chi' -> max(chi', 0) in the variance update, eq. (36), and nothing else.
+- Notebook 09's setup and protocol, copied read-only from `09_matcheado.ipynb` at `6e6dabc` (scenario,
+  signals, filters, quadrature, settling rule, change test). The clipped filter gets its own epsilon
+  search, since clipping moves the floor.
+- Notebook 08's quadrature written over arrays (`vectorised_gg`): same pieces, change of variable, nodes
+  and weights. Checked against `chi_quadrature` (1e-15) before use; 8.5 us per error against 29.5.
+- The batched sKF of `fkf.ipynb` with `clip`, `record` and `flip_at` options; defaults reproduce the
+  original.
+- chi' < 0 counted in windows of the change run (at rest, the first 500 steps after, 500-2000, to
+  recovery), and v_t recorded, to see the mechanism and not only the recovery time.
+- The nb 09 "guard" (`chi_slope` returned by `sKF_quadrature`) only asserts chi' <= 1 and finiteness; it
+  never clips. Confirmed before adding the clip.
+- Clipped variant plotted in violet #4a3aa7, dashed; with the three existing colours it passes the
+  palette validator on all pairs (CVD Delta E >= 9.2, normal vision 16.3).
+
+**Why**
+- Clipping only the variance update isolates the one path through which negative chi' acts.
+- Re-running notebook 09's own protocol, not `fkf.ipynb`'s shorter search, makes its numbers a control.
+
+**Rejected**
+- Keeping notebook 09's epsilon for the clipped filter: its floor would differ, so the recovery would not
+  be compared at equal floor.
+- The scalar quadrature filter for the runs: about 3.5x slower, for the same numbers.
+
+**Result**
+- Control: minorized, joint and matched land on notebook 09's epsilon, 4357 / 4756 / 3630 steps at rest and
+  7340 / 7584 / 5979 to recover, exactly.
+- At rest clipping changes nothing that matters: epsilon 2.23e-6 (against 2.19e-6), the same 3630 steps.
+  chi' < 0 on 6.1 % of the steps.
+- Across the change the clipped filter recovers in **6312** steps: 1.06x the unclipped matched filter,
+  0.83x the joint, 0.86x the minorized. Clipping takes back 333 of the matched filter's 1605-step lead over
+  the joint filter, about a fifth. **Negative chi' is a small part of the faster recovery, not its cause.**
+- Level table (steps after the change): clipped/matched 1.12 at 0 dB, 1.09 / 1.06 / 1.05 at -5 / -10 /
+  -15 dB, 1.06 at floor + 3.
+- Mechanism: right after the change half of the matched filter's chi' are negative (50.1 % over the first
+  500 steps) and the mean chi' falls to 0.21 (joint 0.33, minorized 0.51). With chi' near 0, eq. (36) stops
+  shrinking v_t and epsilon accumulates, so v_t grows even when clipped: 1.94x its value at rest, against
+  2.36x unclipped, 1.51x joint, 1.44x minorized. That larger v_t, not the negative chi' as such, gives the
+  faster descent below -5 dB.
+- Run time 6.0 min.
+
+## 2026-09-24 - Why Leszek's matched filter recovers more slowly (`leszek-setup.ipynb`, issues #8, #14)
+
+**Decided**
+- Anchor first: Leszek's signals (`default_rng(1)`, same draws as `sims/sep18/ggbench.py`, overleaf
+  `03e62fa`), his tuning, floor and reading rewritten line for line, run through our filter code. Compared
+  with his JSON and with the curves he saved. Nothing imported from and nothing written to the overleaf
+  folder.
+- Then notebook 09's setup and protocol for both the sKF and the fKF (the fKF sweeping v over
+  logspace(-6, -1, 11) as `fkf.ipynb`), and one change at a time: (a) white input; (b) change at 6000.
+- (b) run in two forms, since its protocol as specified is out of reach (see Why): (b1) only the change time
+  moves, parameters and floor from the run at rest; (b2) his window floor and bisection at -15 dB, the
+  deepest level all six filters reach, the bisection started on the rising side of the window-level curve.
+- Then, on top of (a), his change time, window floor and tuning at -20 dB, then his moving average. The
+  random response, R = 40, v0 = 1/M and the update from t = 0 were not moved, because the ratio was already
+  explained.
+
+**Why**
+- An anchor that reproduces his numbers shows the filter code is not the difference, so the rest can be
+  read as the setup.
+- With AR(-0.9) input the mean over [4500, 6000) cannot reach -20 dB for five of the six filters at any
+  parameter (deepest: sKF -17.99 / -17.72 / -20.59, fKF -15.95 / -16.56 / -18.74 for minorized / exact /
+  matched). The level is U-shaped in the parameter; his bisection assumes it rises, so at -20 dB it would
+  slide to the bottom of the bracket and return a filter that has not converged.
+
+**Rejected**
+- Running `ggbench.py` itself: it writes into the overleaf folder, and the anchor with our code is the
+  stronger check.
+- (b) at -20 dB with his bisection: not a valid run, see Why.
+
+**Result**
+- Anchor: his JSON reproduced exactly, every parameter to four digits and every time to the step (sKF 730 /
+  758 / 650 to converge, 1326 / 1275 / 1614 to recover; fKF 959 / 948 / 1224 and 1565 / 1625 / 3476).
+  Curves at his parameters match his saved ones to 7e-15 dB where he uses a closed form, and to 8e-4 to
+  2e-3 dB where he uses his trapezoid quadrature.
+- Recovery, matched / exact and matched / minorized:
+
+  | setup | sKF | fKF |
+  |---|---|---|
+  | Leszek (JSON), and the anchor | 1.27 / 1.22 | 2.14 / 2.22 |
+  | our setup, notebook 09's protocol | 0.79 / 0.81 | 0.92 / 0.96 |
+  | (a) white input only | **1.30 / 1.26** | **2.10 / 2.22** |
+  | (b1) change at 6000 only | 0.82 / 0.83 | 0.93 / 0.96 |
+  | (b2) change at 6000, window floor at -15 dB | 0.86 / 0.84 | 0.87 / 0.86 |
+  | (a) + change at 6000 + window floor, -20 dB | 1.27 / 1.21 | 2.10 / 2.20 |
+  | + 100-sample moving average | 1.27 / 1.21 | 2.10 / 2.20 |
+
+- **The input colour is the whole difference.** White input alone brings the ratio to within 0.04 of his.
+  The change time, the floor window, the tuning and the smoothing do not flip it and move it by at most 0.05.
+- Why: in both setups the matched filter starts the recovery late (at 0 dB, matched / exact is 1.09 sKF,
+  1.46 fKF under AR input; 1.80 and 3.20 under white input). Under AR(-0.9) the recovery lasts 6000-8000
+  steps and the matched filters catch up near the floor. Under white input it lasts 1200-1600 steps: from
+  0 dB to the floor the matched sKF takes 749 steps and the exact 755, so the late start is never won back.
+- Our fKF rows under notebook 09's protocol (7909 / 8188 / 7562, 0.92 / 0.96) differ slightly from
+  `fkf.ipynb`'s shorter search (0.90 / 0.94).
+- So the draft's 1.2-2.2x holds for white input and not for the coloured input of our setup. Which input
+  the paper uses is a question for Leszek.
+- Run time 20.1 min.
+
+## 2026-09-24 - SNR sweep with the moving target, white input (`snr-sweep-moving-target.ipynb`, issue #8)
+
+**Decided**
+- Notebook 07's sweep needs no new run: its scenario (AR(-0.9), room response, beta* = 0.2, E|eta|) and
+  filter pair (sKF-L minorized against joint, the same filter as the marginal "exact") are those of
+  `04_escenario_realista_large_k_mad.ipynb`, which already has the moving target -(SNR + 15) dB.
+- Notebook 05's sweep (white input, sKF-L and fKF-L pairs) re-run with the moving target: its filters,
+  grids (logspace(-11, -3, 17) for epsilon, logspace(-6, 0, 13) for v), signals, drift rule and search
+  protocol (R = 3 over 48000 steps, curves at R = 10), copied from `05_entrada_blanca.ipynb` at `4e3102a`.
+  Only the target moves. SNRs 0-30 dB, to match notebook 04's row.
+- Runs in the batched filters, checked against notebook 05's scalar ones, and a control at notebook 05's
+  own fixed -20 dB target before any new number.
+
+**Why**
+- The control shows the only thing that differs from notebook 05 is the target.
+
+**Rejected**
+- Re-running notebook 07's scenario: it would repeat notebook 04's run.
+- Moving the grid with the SNR, as notebook 04 does: "same grid as notebook 05" was the instruction, and
+  the targets are bracketed at every SNR except the one below.
+
+**Result**
+- Control: all 16 step counts of notebook 05's fixed-target table reproduced exactly.
+- Exact / minorized steps, white input, target -(SNR + 15) dB, at 0 / 5 / 10 / 15 / 20 / 25 / 30 dB:
+  sKF-L 1.11, 1.04, 1.06, 1.04, 1.09, 1.04, 1.05; fKF-L 0.98, 1.00, 1.03, 1.10, 1.17, 1.22, no point.
+- sKF-L: 4-11 % slower at every SNR, no trend. Under AR(-0.9) input (notebook 04) the same ratio falls with
+  SNR and crosses 1 near 20 dB; under white input it does not.
+- fKF-L: the fixed target hid a trend. Notebook 05 gave 1.01, 1.00, 1.00, 0.98 at 0-15 dB; with the moving
+  target the exact fKF-L falls behind as the SNR rises, 1.10 at 15 dB and 1.22 at 25 dB.
+- 30 dB, fKF-L: no point. The exact filter's deepest settled floor is -44.81 dB against the -45 dB target;
+  a check with the v grid one decade lower gives no deeper settled point, so the limit is the 48000-step
+  runs, not the grid.
+- Run time 2.2 min.
