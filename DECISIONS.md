@@ -262,3 +262,115 @@
   shared across notebook cells, so the definitions would have to be repeated in every cell.
 - `.vscode/settings.json` with `markdown.math.macros`: editor-only, so the math would still break on
   GitHub and nbviewer, and that setting is documented for the markdown preview, not for notebooks.
+
+## 2026-09-23 - fKF from the joint posterior, and the matched fKF across a change (`fkf.ipynb`)
+
+**Decided**
+- A new notebook, `fkf.ipynb`, rather than cells added to `vkf-kf.ipynb`: the comments that closed
+  #10 and #11 cite that notebook's outputs, so it stays as it is.
+- Three fKFs, differing only in the correction: minorized, exact (joint, eq. `fKF.mean`) and matched (the
+  generalized Gaussian at beta* and its true scale, via `chi_quadrature`). The minorized one is included
+  because Leszek's 2.14x / 2.22x compare the matched fKF against both Laplacian filters.
+- Code copied read-only with its source commit, as Ignacio decided on #8 (no shared module):
+  `chi_laplacian` from notebook 07 (`9406077`), the quadrature from notebook 08 (`0ed92a4`), the change
+  test from notebook 09 (`9afa027`), the marginal fKF-L from notebook 04 (`db4b3a9`).
+- At rest: the protocol of `vkf-kf.ipynb` (search R = 3, N = 24000; checked run R = 20, N = 96000), `v`
+  swept over logspace(-6, -1, 11), both `b_eta` conventions. The sKF runs through the same code as a
+  control and must land on 5787 / 4729 steps.
+- Across the change: notebook 09's test (2N steps, h -> -h at N, recovered = within 3 dB of the floor at
+  rest), at `b_eta = E|eta|` only, each filter at its `v` at rest.
+- A table of the time to reach 0, -5, -10 and -15 dB after the change, beside the 3 dB criterion.
+- Plot colours from a palette checked for colour-blind readers.
+
+**Why**
+- The joint fKF's result was predictable (Gamma = 0, so it must be notebook 04's filter); the new
+  information is its `E|eta|` row and the matched run.
+- The `vkf-kf.ipynb` protocol keeps the fKF comparable with the sKF / vKF / KF, and costs about 2.7e6
+  quadrature calls against about 2.1e7 for notebook 07's full-grid protocol. The whole notebook runs in
+  3.7 min.
+- The 3 dB criterion reads recovery at one level, and the curves showed the matched fKF behind early and
+  ahead late, so a single number would have hidden the result.
+- Matplotlib's default orange and green are almost the same colour for red-blind readers (Delta E 0.7);
+  the replacement passes (Delta E 9.2).
+
+**Rejected**
+- Notebook 07 / 09's protocol (every grid point at R = 20, N = 96000): about 8x more quadrature calls for
+  the same kind of checked run.
+- Rewriting `chi_quadrature` to run over batches: 28 us per call, and the notebook already runs in minutes.
+- A Gaussian fKF: notebook 04 needs about 400000 steps for it, and it is not part of either question.
+- The two setup tests suggested on #8 (white input; change after 6000 samples): not in the scope chosen.
+
+**Result**
+- Checks: joint fKF = notebook 04's marginal fKF-L to 7e-16; minorized = notebook 04's to 6e-16; quadrature
+  at beta = 1 = closed form to 7e-16; batched = scalar to 1e-15. Control: 5787 and 4729 steps, exact.
+- At rest, exact over minorized: **1.32x** at `sqrt(v/2)` (notebook 04: 1.32x), **1.05x** at `E|eta|`. The
+  minorized fKF does not move with the convention (5168 -> 5162); the exact one gets 21 % faster
+  (6842 -> 5422). The exact fKF is slower than the exact sKF (5422 against 4729).
+- At rest, the matched fKF is fastest: **0.76x** the exact, **0.80x** the minorized.
+- Across the change, at the 3 dB level, the matched fKF recovers slightly **faster**: **0.90x** the exact,
+  **0.94x** the minorized, against Leszek's 2.14x / 2.22x. The draft's 1.2-2.2x does not hold here for the
+  fKF either.
+- **It depends on the level**: matched / exact is 1.44 at 0 dB, 1.17 at -5, 1.04 at -10, 0.95 at -15 and
+  0.90 at floor + 3 dB. The matched fKF is slower while the error is large (the redescending score reads it
+  as outliers, the mechanism Section 4 describes) and faster near the floor.
+- Even at 0 dB, 1.44x is below Leszek's 2.14x, so the level does not explain his number; his setup must
+  (white input, random response, 6000 samples before the change, a moving-average reading).
+
+## 2026-09-24 - The convergence gap at both b_eta conventions (`convergence-gap.ipynb`)
+
+**Decided**
+- The notebook now runs at both conventions: the ratio against target J (section 4), the four
+  configurations, the comparison at the J each run reaches, and the AR sweep (sections 5-6). The
+  validation against the draft's 479 / 487 / 707 stays at sqrt(v/2) only, because the draft computed
+  those numbers there. Every sqrt(v/2) result is kept, and each one reproduces to the last printed digit.
+  This reverses the 2026-09-21 decision to keep this notebook at the old convention, as additive only.
+- `b_eta_of` copied from `vkf-kf.ipynb` (cell 4), with a source comment. `B_ETA_A` is a dict keyed by
+  convention; `run_configuration` and `analysis_at` take the convention as a parameter.
+- Under E|eta| the simulation's v~ grid is multiplied by b_eta/sqrt(v_eta/2), so it is the same grid in
+  tau = v||x||^2/b_eta under both conventions. The factor is exactly 1.0 under the old one.
+- Figure: one colour per convention (#2a78d6 and #eb6834, the pair from `fkf.ipynb`), one marker shape
+  per configuration, filled for white input and open for AR(-0.9). The left panel has two legends so
+  that neither covers a point or a curve.
+- `sigma_for_target` keeps its bracket (1e-3, 1e2).
+
+**Why**
+- Section 5 of the new draft (`main.tex:1576`, a placeholder) is this analysis, stated at E|eta|. The
+  old draft's 1.13 and the #12 record are at sqrt(v/2). Both are needed, and neither replaces the other.
+- b_eta enters the minorized filter only through tau. On a common tau grid the minorized search
+  picks the same tau and runs the same filter, so its row becomes a control, and any change in the
+  ratio comes from the exact filter. With a fixed v grid the minorized pick would have moved by
+  interpolation error alone, and that error would have leaked into the ratio.
+- Colours: the CIE76 Delta E between the two is at least 97 under simulated protan, deutan and
+  tritan vision (Machado 2009 matrices). The old pair, COLORS[1] / COLORS[3] (orange / red), was 29-41.
+- Bracket: at sigma = 1e-3 the steady state is at J = -76 dB and at 1e2 at -0.2 dB under E|eta| too,
+  so every target here is bracketed. The acceptance check run with (1e-4, 1e2) gave the same step counts.
+
+**Rejected**
+- Switching the notebook to E|eta| only: it would have dropped the matched comparison with the
+  draft's 1.13 and the record of #12.
+- The same v grid under both conventions: see Why.
+- Keeping colour for white vs AR and adding a line style for the convention: eight colour/fill/shape
+  combinations on one panel, and the default orange/red pair is weak for colour-blind readers.
+
+**Result**
+- Acceptance check reproduced exactly, steps exact/minorized at sqrt(v/2) / E|eta|: 1.025 / 0.950,
+  1.074 / 0.975, 1.132 / 1.012, 1.213 / 1.072, 1.305 / 1.138, 1.499 / 1.286 at J = -10, -15, -20, -25,
+  -30, -40 dB. Minorized steps identical under both at every J.
+- Analysis at E|eta|: 0.950 at -10 dB up to 1.439 at -50 dB. It crosses 1 between -15 and -20 dB,
+  so at shallower targets the exact filter is the faster one. The exact filter takes 7 % (at -10 dB)
+  to 15 % (at -50 dB) fewer steps than at sqrt(v/2). The quoted row 1.13 / 1.05 / 1.00 becomes
+  1.01 / 0.98 / 0.95.
+- Simulation at E|eta|: the minorized filter does not move (same steps in every configuration, floors
+  within 3.6e-15 dB). White input gives 1.009 (M = 128) and 1.020 (M = 16), against 1.012 from the
+  analysis. AR at M = 16 gives 1.106 at -26.9 dB against 1.097.
+- **"The gap is the input" holds under E|eta| too, but the gap is much smaller.** AR(-0.9) at M = 128:
+  1.141 against 1.000 from the analysis at its J, an excess of 0.14 where sqrt(v/2) gave 0.44
+  (1.546 against 1.110). AR sweep: 1.009, 1.045, 1.048, 1.141 as cond(Rxx) runs 1, 9, 32, 347
+  (was 1.105, 1.240, 1.305, 1.546). The step from 9 to 32 is within the protocol's noise. The exact
+  filter gains more from the new scale under coloured input (10943 -> 8080 steps) than under white
+  input (1568 -> 1432).
+- Cross-checks at 5 dB, white, E|eta| (J = -15 dB, analysis 0.975): Ignacio's notebook 05 fKF-L
+  1054 / 1057 = 1.00 (`ignacio/joint-vs-marginal-vs-minorized`, `4e3102a`); Leszek's
+  `sims/sep18/ggb_summary_ar0.0.json` fLe / fLm 936 / 947 = 0.99. The 0 dB row of Ignacio's SNR sweep,
+  1431 / 1419, matches this notebook's white M = 128 run (1432 / 1419) to within one step.
+- Run time 175 s (was 102 s).
