@@ -41,7 +41,7 @@ MCC_parameters  = namedtuple('MCC_parameters', ['label', 'mu', 'sigma'])
 RZA_LMS_parameters = namedtuple('RZA_LMS_parameters', ['label', 'mu', 'rho', 'epsilon'])
 
 sKF_parameters = namedtuple('sKF_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0'])
-AWU_sKF_parameters = namedtuple('AWU_sKF_parameters', ['label', 'epsilon_0', 'var_eta', 'v_tilde_0'])
+AWU_sKF_parameters = namedtuple('AWU_sKF_parameters', ['label', 'var_eta', 'v_tilde_0'])
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 
 sKF_L_parameters = namedtuple('sKF_L_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0'])
@@ -52,6 +52,7 @@ filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 std_env_parameters = namedtuple('std_env_parameters', ['ho', 'AR','var_v','var_x'])
 sys_inversion_gaussian_env_parameters = namedtuple('sys_inversion_gaussian_env_parameters', ['ho', 'AR', 'var_v', 'var_x'])
 laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
+sys_inversion_laplacian_env_parameters = namedtuple('sys_inversion_laplacian_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
 
 # Tipos de array estáticos exigidos pelo objmode
 Complex1D = Array(complex128, 1, "C")
@@ -422,7 +423,6 @@ def sKF_algorithm(N, x, d, h0, parameters):
 def AWU_sKF_algorithm(N, x, d, h0, parameters):
   # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
   h = np.copy(h0)
-  epsilon = np.copy(parameters.epsilon_0)
   var_eta = np.copy(parameters.var_eta)
   v_tilde_0 = np.copy(parameters.v_tilde_0)
 
@@ -684,6 +684,29 @@ def sys_inversion_gaussian_behavior(N: int, params: std_env_parameters, warm_up:
     h_hist = np.vstack((first_half, second_half))
 
     return h_hist, {'x': x[L-1:N+L-1], 'v': v, 'd': d}
+  
+@njit(cache=True, nogil=True)
+def sys_inversion_laplacian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = np.random.laplace(loc=0.0, scale=params.scale_v, size=(N,))
+
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up, var_x = params.var_x)
+
+    # Determine the desired signal
+    d = np.zeros((N,), dtype=np.float64)
+    d[:N//2] = v[:N//2] + np.convolve(params.ho, x[:N//2+L], mode = 'full')[L-1:N//2+L-1]
+    d[N//2:] = v[N//2:] + np.convolve(-params.ho, x[N//2:], mode = 'full')[L-1:N//2+L-1]
+    
+    # ho through time
+    first_half = np.zeros((N//2, params.ho.shape[0]), dtype=params.ho.dtype) + params.ho[np.newaxis, :]
+    second_half = np.zeros(((N+1)//2, params.ho.shape[0]), dtype=params.ho.dtype) - params.ho[np.newaxis, :]
+    h_hist = np.vstack((first_half, second_half))
+
+    return h_hist, {'x': x[L-1:N+L-1], 'v': v, 'd': d}
 
 @njit(cache=True, nogil=True)
 def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool = True):
@@ -701,6 +724,8 @@ def laplace_noise_behavior(N: int, params: laplace_env_parameters, warm_up: bool
     x = x[L:N+L]
 
     return params.ho, {'x': x, 'v': v, 'd': d}
+  
+
 
 @njit(cache=True, nogil=True)
 def _compute_MSD(h_hist, ho):
