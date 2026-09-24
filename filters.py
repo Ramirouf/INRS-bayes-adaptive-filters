@@ -45,6 +45,7 @@ AWU_sKF_parameters = namedtuple('AWU_sKF_parameters', ['label', 'var_eta', 'v_ti
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 
 sKF_L_parameters = namedtuple('sKF_L_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0'])
+AWU_sKF_L_parameters = namedtuple('AWU_sKF_L_parameters', ['label', 'b_eta', 'v_tilde_0'])
 sKF_L_int_parameters = namedtuple('sKF_L_int_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 
 filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
@@ -85,17 +86,6 @@ def log_ndtr_scalar(x):
     
     # Fixed: Added -math.log(2.0) to correctly scale erfc into ndtr
     return -z2 - math.log(z) - 0.5 * math.log(math.pi) + math.log(sum_terms) - math.log(2.0)
-
-@vectorize(["float64(float64)"], nopython=True)
-def log_ndtr(x):
-    return log_ndtr_scalar(x)
-
-
-# Element-wise array wrapper using Numba Vectorize
-@vectorize(["float64(float64)"], nopython=True)
-def log_ndtr(x):
-    return log_ndtr_scalar(x)
-
 
 # Element-wise array wrapper using Numba Vectorize
 @vectorize(["float64(float64)"], nopython=True)
@@ -446,9 +436,43 @@ def AWU_sKF_algorithm(N, x, d, h0, parameters):
     if k >= L:
       # predict
       norm = np.dot(xtemp, xtemp)
-      #J_hat = (var_eta + epsilon*norm)
-      # epsilon *= (1.0 + epsilon*(e[k]**2 - J_hat)*norm/(float_L*(J_hat**2)))
-      #v += epsilon
+      J_hat = (var_eta + v*norm)
+      v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat**2)))
+      # update
+      s = var_eta + v * norm
+      h += xtemp * (v * e[k]/s)
+      v *= (1.0 - (v * norm) / (float_L * s)) 
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
+  # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
+  h = np.copy(h0)
+  b_eta = np.copy(parameters.b_eta)
+  v_tilde_0 = np.copy(parameters.v_tilde_0)
+
+  L = len(h)
+  float_L = np.float64(L)
+  
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  v=v_tilde_0
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # predict
+      norm = np.dot(xtemp, xtemp)
+      var_eta = b_eta * np.abs(e[k])
       J_hat = (var_eta + v*norm)
       v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat**2)))
       # update
@@ -464,10 +488,6 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
     epsilon = parameters.epsilon
     b_eta = parameters.b_eta
     v_tilde_0 = parameters.v_tilde_0  
-
-    # normalize x
-    # regularization = 1e-3
-    # x_reg = np.sign(x) * (np.abs(x) + regularization)
 
     L = len(h)
     y = np.zeros((N,))
