@@ -587,7 +587,6 @@ def dask_MC_Simulations(N,
         ))
     
     tasks_tree = create_tasks_tree(tasks)
-    tasks_tree.visualize()
 
     with dask_PB():
         measures = dask.compute(tasks_tree, num_workers=num_workers)[0]
@@ -600,7 +599,7 @@ def dask_MC_Simulations(N,
         measures[label]['var'] /= NR
         measures[label]['MSD'] /= NR
 
-    return measures
+    return measures, tasks_tree
 
 gaussian_params = np.dtype([("mean", "f8"),
                             ("variance", "f8")])
