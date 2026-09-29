@@ -561,6 +561,17 @@ def create_tasks_tree(tasks):
                 next_stage.append(tasks[i])
         tasks = next_stage
     return tasks[0]
+  
+def _check_scheduler_value(scheduler):
+    if scheduler not in ["threads", "processes"]:
+        raise ValueError("Scheduler must be either 'threads' or 'processes'")
+      
+def _check_numba_algorithms(Algorithms, scheduler):
+  if scheduler == "threads":
+      for alg in Algorithms:
+          if not isinstance(alg, numba.core.dispatcher.Dispatcher):
+              import warnings
+              warnings.warn(f"Algorithm {alg.__name__} is not numba-jitted. Using 'threads' scheduler may not be efficient.")
 
 def dask_MC_Simulations(N, 
                         NR,
@@ -570,11 +581,14 @@ def dask_MC_Simulations(N,
                         Parameters,
                         h0,
                         num_workers = 1,
-                        num_chunks = None):
+                        num_chunks = None,
+                        scheduler = "threads"):
     L = len(h0)
     N_Algorithms = len(Algorithms)
     if num_chunks is None:
         num_chunks = num_workers
+    _check_scheduler_value(scheduler)
+    _check_numba_algorithms(Algorithms, scheduler)
 
     rest_of_realizations = NR % num_chunks
     tasks = [delayed_chunked_iterations(
@@ -589,7 +603,8 @@ def dask_MC_Simulations(N,
     tasks_tree = create_tasks_tree(tasks)
 
     with dask_PB():
-        measures = dask.compute(tasks_tree, num_workers=num_workers)[0]
+        extra = {"chunksize": 1} if scheduler == "processes" else {}
+        measures = dask.compute(tasks_tree, num_workers=num_workers, scheduler=scheduler, **extra)[0]
 
     for k in range(N_Algorithms):
         label = Parameters[k].label
