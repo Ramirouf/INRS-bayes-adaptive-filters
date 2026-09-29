@@ -23,6 +23,7 @@ import scipy.signal
 import scipy
 import numba
 import dask
+import warnings
 from dask.diagnostics import ProgressBar as dask_PB
 from numba import njit, prange, objmode, types
 from typing import List, Optional, Any, AnyStr, TypedDict
@@ -495,8 +496,10 @@ def MC_Simulations(N,
                    Parameters,
                    h0,
                    PBar = None,
-                   external_avg = False):
+                   external_avg = False,
+                   seed = None):
     L = len(h0)
+    np.random.seed(seed)
     N_Algorithms = len(Algorithms)
     measure_init = lambda taps, N_iter: {'h': np.zeros((N_iter, taps)),
                                          'J': np.zeros(N_iter),
@@ -567,11 +570,29 @@ def _check_scheduler_value(scheduler):
         raise ValueError("Scheduler must be either 'threads' or 'processes'")
       
 def _check_numba_algorithms(Algorithms, scheduler):
-  if scheduler == "threads":
-      for alg in Algorithms:
-          if not isinstance(alg, numba.core.dispatcher.Dispatcher):
-              import warnings
-              warnings.warn(f"Algorithm {alg.__name__} is not numba-jitted. Using 'threads' scheduler may not be efficient.")
+    if scheduler == "threads":
+        for alg in Algorithms:
+            if not isinstance(alg, numba.core.dispatcher.Dispatcher):
+                import warnings
+                warnings.warn(f"Algorithm {alg.__name__} is not numba-jitted. Using 'threads' scheduler may not be efficient.")
+              
+def _get_seed_sequence(seed, num_chunks):
+    if seed is None:
+        seed = np.random.SeedSequence().entropy
+        return np.random.SeedSequence(seed).spawn(num_chunks)
+    if isinstance(seed, int) and seed >= 0:
+        return np.random.SeedSequence(seed).spawn(num_chunks)
+    raise ValueError("Seed must be None or a non-negative integer")
+
+def _check_num_chunks(num_chunks, num_workers):
+    if num_chunks <= 0 or not isinstance(num_chunks, int):
+        raise ValueError("num_chunks must be a positive integer")
+    if num_chunks < num_workers:
+        warnings.warn("num_chunks is less than num_workers. Setting num_chunks to num_workers.")
+        num_chunks = num_workers
+    if num_chunks is None:
+        num_chunks = num_workers
+    return num_chunks
 
 def dask_MC_Simulations(N, 
                         NR,
@@ -582,22 +603,22 @@ def dask_MC_Simulations(N,
                         h0,
                         num_workers = 1,
                         num_chunks = None,
+                        seed = None,
                         scheduler = "threads"):
-    L = len(h0)
     N_Algorithms = len(Algorithms)
-    if num_chunks is None:
-        num_chunks = num_workers
+    seed_sequence = _get_seed_sequence(seed, num_chunks)
+    num_chunks = _check_num_chunks(num_chunks, num_workers)
     _check_scheduler_value(scheduler)
     _check_numba_algorithms(Algorithms, scheduler)
 
     rest_of_realizations = NR % num_chunks
     tasks = [delayed_chunked_iterations(
-        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True
-    ) for _ in range(num_chunks)]
+        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True, seed = seed_sequence[k].generate_state(1)
+    ) for k in range(num_chunks)]
     
     if rest_of_realizations > 0:
         tasks.append(delayed_chunked_iterations(
-            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True
+            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True, seed = seed_sequence[-1].generate_state(1)
         ))
     
     tasks_tree = create_tasks_tree(tasks)
