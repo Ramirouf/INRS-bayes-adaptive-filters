@@ -12,7 +12,7 @@ from numba import njit
 
 from numpy.typing import NDArray
 
-#njit(cache=True, nogil=True)
+@njit(cache=True, nogil=True)
 def squared_error(
     algorithm_output: filters.filter_output, 
     noise_signal: NDArray[np.float64], 
@@ -24,7 +24,7 @@ def squared_error(
     Parameters:
     algorithm_output (array-like): Output of the adaptive filter algorithm.
     noise_signal (array-like): Noise signal added to the system output.
-    true_system (array-like): True system output without noise.
+    true_system (array-like): True system without noise.
 
     Returns:
     float: Mean squared error.
@@ -33,8 +33,32 @@ def squared_error(
     squared_error = (algorithm_output.e)**2
     
     return squared_error
+
+@njit(cache=True, nogil=True)
+def power_error(
+    algorithm_output: filters.filter_output, 
+    noise_signal: NDArray[np.float64], 
+    true_system: NDArray[np.float64],
+    p: np.float64 = 2):
+    """
+    Compute the power error between the algorithm output and the true system output.
+
+    Parameters:
+    algorithm_output (array-like): Output of the adaptive filter algorithm.
+    noise_signal (array-like): Noise signal added to the system output.
+    true_system (array-like): True system without noise.
+    p (float, optional): Power to raise the error to. Default is 2.
+
+    Returns:
+    float: Mean power error.
+    """
     
-#njit(cache=True, nogil=True)
+    power_error = algorithm_output.e**p
+    
+    return power_error
+    
+
+@njit(cache=True, nogil=True)
 def excess_squared_error(
     algorithm_output: filters.filter_output, 
     noise_signal: NDArray[np.float64], 
@@ -46,7 +70,7 @@ def excess_squared_error(
     Parameters:
     algorithm_output (array-like): Output of the adaptive filter algorithm.
     noise_signal (array-like): Noise signal added to the system output.
-    true_system (array-like): True system output without noise.
+    true_system (array-like): True system without noise.
 
     Returns:
     float: Mean excess squared error.
@@ -56,19 +80,42 @@ def excess_squared_error(
     
     return excess_squared_error
 
-#njit(cache=True, nogil=True)
+@njit(cache=True, nogil=True)
+def excess_power_error(
+    algorithm_output: filters.filter_output, 
+    noise_signal: NDArray[np.float64], 
+    true_system: NDArray[np.float64],
+    p: np.float64 = 2):
+    """
+    Compute the excess power error between the algorithm output and the true system output.
+
+    Parameters:
+    algorithm_output (array-like): Output of the adaptive filter algorithm.
+    noise_signal (array-like): Noise signal added to the system output.
+    true_system (array-like): True system without noise.
+    p (float, optional): Power to raise the error to. Default is 2.
+
+    Returns:
+    float: Mean excess power error.
+    """
+    
+    excess_power_error = (algorithm_output.e - noise_signal)**p
+    
+    return excess_power_error
+
+@njit(cache=True, nogil=True)
 def squared_deviation(
     algorithm_output: filters.filter_output, 
     noise_signal: NDArray[np.float64], 
     true_system: NDArray[np.float64],
     ):
     """
-    Compute the squared deviation between the algorithm output and the true system output.
+    Compute the squared deviation between the algorithm system estimative and the true system plant.
 
     Parameters:
     algorithm_output (array-like): Output of the adaptive filter algorithm.
     noise_signal (array-like): Noise signal added to the system output.
-    true_system (array-like): True system output without noise.
+    true_system (array-like): True system without noise.
 
     Returns:
     float: Mean squared deviation.
@@ -77,7 +124,7 @@ def squared_deviation(
     if true_system.ndim == 1:
         normalization_factor = np.dot(true_system, true_system)
     else:
-        normalization_factor = np.array([np.dot(true_system[i,:], true_system[i,:]) for i in range(true_system.shape[0])])
+        normalization_factor = np.array([np.dot(true_system[k,:], true_system[k,:]) for k in range(true_system.shape[0])])
     h_error = algorithm_output.h - true_system
         
     squared_deviation = np.zeros(h_error.shape[0])
@@ -89,3 +136,38 @@ def squared_deviation(
             squared_deviation[k] /= normalization_factor[k]
     
     return squared_deviation
+
+@njit(cache=True, nogil=True)
+def power_deviation(
+    algorithm_output: filters.filter_output, 
+    noise_signal: NDArray[np.float64], 
+    true_system: NDArray[np.float64],
+    p: np.float64 = 2):
+    """
+    Compute the power deviation between the algorithm system estimative and the true system plant.
+
+    Parameters:
+    algorithm_output (array-like): Output of the adaptive filter algorithm.
+    noise_signal (array-like): Noise signal added to the system output.
+    true_system (array-like): True system without noise.
+    p (float, optional): Power to raise the system deviation to. Default is 2.
+
+    Returns:
+    float: Mean power deviation.
+    """
+    
+    if true_system.ndim == 1:
+        normalization_factor = np.sum(np.abs(true_system)**p)
+    else:
+        normalization_factor = np.array([np.sum(np.abs(true_system[k,:])**p) for k in range(true_system.shape[0])])
+    h_error = algorithm_output.h - true_system
+        
+    power_deviation = np.zeros(h_error.shape[0])
+    for k in range(h_error.shape[0]):
+        power_deviation[k] = np.sum(np.abs(h_error[k,:])**p)
+        if true_system.ndim == 1:
+            power_deviation[k] /= normalization_factor
+        else:
+            power_deviation[k] /= normalization_factor[k]
+    
+    return power_deviation
