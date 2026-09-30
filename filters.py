@@ -510,7 +510,7 @@ def MC_Simulations(N,
                    Parameters,
                    h0,
                    PBar = None,
-                   external_avg = False,
+                   average = True,
                    seed = None):
     L = len(h0)
     np.random.seed(seed)
@@ -540,7 +540,7 @@ def MC_Simulations(N,
 
         _PBbar_update(PBar, k, NR)
     
-    if not external_avg:
+    if average:
       for k in range(N_Algorithms):
           label = Parameters[k].label
           measures[label]['h'] /= NR
@@ -622,12 +622,12 @@ def dask_MC_Simulations(N,
 
     rest_of_realizations = NR % num_chunks
     tasks = [delayed_chunked_iterations(
-        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, external_avg = True, seed = seed_sequence[k].generate_state(1)
+        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = seed_sequence[k].generate_state(1)
     ) for k in range(num_chunks)]
     
     if rest_of_realizations > 0:
         tasks.append(delayed_chunked_iterations(
-            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, external_avg = True, seed = seed_sequence[-1].generate_state(1)
+            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = seed_sequence[-1].generate_state(1)
         ))
     
     tasks_tree = create_tasks_tree(tasks)
