@@ -108,13 +108,16 @@ def autocorr_matrix_calc(AR, var_v, M = None):
   # Save the first L values
   rxx[:L] = vec_Rxx[:L]
 
-  # Compute the remaining values using the autoregressive coeficients
+  # Compute the remaining values using the autoregressive coefficients
   if M > L:
     for k in range(L, M):
+      coefficients = np.ascontiguousarray(AR[1:]) 
       if k == L:
-        rxx[k] = - AR[1:] @ rxx[(k-1)::-1]
+        input_corr = np.ascontiguousarray(rxx[(k-1)::-1])
+        rxx[k] = - np.dot(coefficients, input_corr)
       else:
-        rxx[k] = - AR[1:] @ rxx[(k-1):(k - L - 1):-1]
+        input_corr = np.ascontiguousarray(rxx[(k-1):(k - L - 1):-1])
+        rxx[k] = - np.dot(coefficients, input_corr)
 
   # Construct the autocorrelation matrix using the values in rxx
   R = toeplitz(rxx)
@@ -430,7 +433,7 @@ def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool 
     x = np.random.randn(N + settling_time)
     
     # Generate the correlated signal
-    AR = AR/AR[0]
+    AR = np.ascontiguousarray(AR/AR[0])
     aux_Rxx = autocorr_matrix_calc(AR, 1, M = len(AR) - 1)
     b = np.sqrt(var_x/aux_Rxx[0,0])
     x = filter(AR, np.array([b]), x)[settling_time:]
