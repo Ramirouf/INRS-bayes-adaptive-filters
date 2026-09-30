@@ -491,6 +491,14 @@ def _compute_MSD(h_hist, ho):
             MSD[k] /= normalization_factor[k]
     return MSD
 
+@njit(cache=True, nogil=True)
+def _compute_EMSE(error_signal, noise_signal):
+    return (error_signal - noise_signal)**2
+  
+@njit(cache=True, nogil=True)
+def _compute_MSE(error_signal):
+    return error_signal**2
+
 def _PBbar_update(PBar, k, NR):
     if PBar is None:
         return
@@ -533,8 +541,8 @@ def MC_Simulations(N,
             algorithm_signals = Algorithms[c](N, x, d, h0, Parameters[c])
             
             measures[label]['h'] += algorithm_signals.h
-            measures[label]['J'] += algorithm_signals.e**2
-            measures[label]['Jex'] += (algorithm_signals.e - signals['v'])**2
+            measures[label]['J'] += _compute_MSE(algorithm_signals.e)
+            measures[label]['Jex'] += _compute_EMSE(algorithm_signals.e, signals['v'])
             measures[label]['MSD'] += _compute_MSD(algorithm_signals.h, ho)
             measures[label]['var'] += algorithm_signals.v
 
