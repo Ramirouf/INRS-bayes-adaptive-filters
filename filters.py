@@ -491,6 +491,17 @@ def _compute_MSD(h_hist, ho):
             MSD[k] /= normalization_factor[k]
     return MSD
 
+def _PBbar_update(PBar, k, NR):
+    if PBar is None:
+        return
+    if PBar == "verbose":
+        print(f'Realization {k} out of {NR}')
+        return
+    if hasattr(PBar, 'update'):
+        PBar.update(1)
+        return
+    warnings.warn(f'Unrecognized PBar type: {type(PBar)}')
+
 def MC_Simulations(N, 
                    NR,
                    environment_parameters,
@@ -527,12 +538,7 @@ def MC_Simulations(N,
             measures[label]['MSD'] += _compute_MSD(algorithm_signals.h, ho)
             measures[label]['var'] += algorithm_signals.v
 
-        if PBar == "":
-          pass
-        elif not PBar is None:
-            PBar.update(1)
-        else:
-            print(f'Realization {k} out of {NR}')
+        _PBbar_update(PBar, k, NR)
     
     if not external_avg:
       for k in range(N_Algorithms):
@@ -616,12 +622,12 @@ def dask_MC_Simulations(N,
 
     rest_of_realizations = NR % num_chunks
     tasks = [delayed_chunked_iterations(
-        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True, seed = seed_sequence[k].generate_state(1)
+        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, external_avg = True, seed = seed_sequence[k].generate_state(1)
     ) for k in range(num_chunks)]
     
     if rest_of_realizations > 0:
         tasks.append(delayed_chunked_iterations(
-            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, "", external_avg = True, seed = seed_sequence[-1].generate_state(1)
+            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, external_avg = True, seed = seed_sequence[-1].generate_state(1)
         ))
     
     tasks_tree = create_tasks_tree(tasks)
