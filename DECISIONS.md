@@ -511,3 +511,48 @@
   a check with the v grid one decade lower gives no deeper settled point, so the limit is the 48000-step
   runs, not the grid.
 - Run time 2.2 min.
+
+## 2026-10-01 - Bank of sKF and fKF filters, Section 4 Algorithms 1 and 2 (`bank-skf-fkf.ipynb`)
+
+**Decided**
+- Algorithms 1 (bank of sKFs over eps) and 2 (bank of fKFs over the fixed predicted variance v) of the draft
+  (`main.tex`, Overleaf `fc54c65`), with the Laplacian and the Gaussian likelihoods, as written. Weights kept as
+  log mu, c formed by logsumexp; the bank does nothing before the window is full. No clamp on the weights.
+- Grids: eps = 1e-9 ... 1e-4, one per decade (K = 6, the draft's remark); v = geomspace(1e-6, 1e-2, 9) (K = 9,
+  Leszek's `fkfbank*.py`); q = 1e-4.
+- With Ramiro, before code: the brute-force check enumerates every eps sequence on a small problem (M = 4, K = 3,
+  12 updates); extra runs: white input, Leszek's drifting system as an anchor, the exact filter tuned to the bank's
+  floor; v0 = 2 in our scenario and 1/M in the anchor; Gaussian likelihood with v_eta = the true noise variance, in
+  the checks and in one table of its own.
+- Comparison in our scenario (notebook 09's, change test): the two Laplacian banks against the six single filters
+  of Section 3 at the values tuned to -20 dB (given, not re-tuned), one plot and one table.
+
+**Why**
+- Item 1 of the draft's open-task list. The draft is the spec; Leszek's scripts are a cross-check.
+
+**Rejected**
+- Leszek's clamp (mu >= 1e-280 or 1e-200): not in the draft, and it changes the q = 0 result (below). Kept only as
+  an option to reproduce his numbers.
+- A grid over theta (M = 1 or 2) as the brute-force check: it mixes the projection with the merge; the sequence
+  enumeration isolates the merge.
+- Two panels for the 8-curve plot: one axis is readable.
+
+**Result**
+- Checks: K = 1 and q = 0 give the single filters bit for bit; the q = 0 weights equal eq. (eps.likelihood) to
+  1e-11; all sums 1 to 1e-13; finite with outliers up to 1e9; brute force exact at the first update and at every
+  update for q = 0, gap 2e-6 to 8e-5 at q = 1e-4, up to 3e-2 at q = 0.2.
+- Anchor: -8.98 / -10.75 / -9.87 / -10.76 dB and Gaussian -7.65 / -8.52 dB, as Leszek's logs and the draft's table.
+  **Without his clamp the q = 0 bank gives -7.21 dB**, 1.8 dB worse than the best fixed eps: no mixing loses all
+  the gain, not half (line 1476).
+- AR(-0.9): the banks start faster after the flip (0 dB at 924 / 886 steps against 1606-2959) but the posterior
+  returns to the smallest grid value within about 0.5 s and they crawl below -10 dB (-15 dB at 31 119 / 72 194
+  against 5345-7154). Mean over the record: sKF bank -13.89 dB against -13.94 to -14.08 for the single sKFs; fKF
+  bank -11.92 against -12.41 to -13.45. As the draft says for coloured input: no gain.
+- White input: floors -44.9 / -44.6 dB, faster at every level, mean -22.64 / -23.01 dB against -17.22 / -16.67 for
+  the exact filters at -20 dB.
+- Short spikes in the bank curves: two outliers in a row move the fKF bank's weight to v = 1e-2, whose evidence
+  bound (sigma_j^2 - sigma_i^2)/(2 b_eta^2) is about 32 nats; the output goes to 0 dB for a few steps.
+- Eq. (bank.weights) as written cancels two terms of size u^2/2: error 6e-7 at |u| = 1e5, wrong beyond 1e8; our
+  runs stay below |u| = 8.5e3.
+- `bankbench.py`'s header comment does not describe its code (the code follows eq. bank.output).
+- Run time 15.1 min.
