@@ -556,3 +556,53 @@
   runs stay below |u| = 8.5e3.
 - `bankbench.py`'s header comment does not describe its code (the code follows eq. bank.output).
 - Run time 15.1 min.
+
+## 2026-10-06 - The full KF beside the banks, and the excess error (`bank-kf-excess-error.ipynb`)
+
+**Decided**
+- Leszek's two follow-ups to the bank figures: run the full Kalman filter in both scenarios (is whitening what
+  speeds up convergence?), and show the excess error s_t = x_t'(theta_t - w_{t-1}) as
+  10 log10(E[s_t^2] / E[(x_t' theta_t)^2]).
+- With Ramiro, before code: "the full Kalman" = one full-covariance KF (`KF_batch` of `vkf-kf.ipynb`, eqs. 31-32) with
+  the exact Laplacian chi and b_eta = E|eta|, tuned to -20 dB by notebook 09's search; "both scenarios" = AR(-0.9) and
+  white input on notebook 09's change test; filters = the four run in both scenarios in the bank notebook (exact sKF,
+  exact fKF, sKF bank, fKF bank) plus the KF; a new notebook, the bank notebook left as committed (`57bd568`).
+- E = mean over the 20 realisations at each step; for curves and step counts both means are smoothed by a 101-step
+  centred moving average, on each side of the change separately. Floors and record means use the unsmoothed means.
+- The filters' code copied from `bank-skf-fkf.ipynb` and `vkf-kf.ipynb` with one option added (`excess`, plus
+  `flip_at` for the KF); s_t is formed from the same `dw` as the misalignment.
+
+**Why**
+- The minorized and matched filters move along x_t like the exact ones and differ only in chi, so they add nothing on
+  whitening; they would also need new white-input runs.
+- A window across the change mixed the -20 dB floor before it with the +6 dB after it: in a first small run the
+  smoothed excess error was below 0 dB at step 0 after the flip while the raw ratio was +6.7 dB.
+
+**Rejected**
+- A bank of full KFs: not in the draft, needs a merge rule for Sigma, 6-10x the cost.
+- The Gaussian (textbook) Kalman filter as "the full Kalman": the exact chi keeps the comparison to the covariance
+  only.
+- Appending to `bank-skf-fkf.ipynb`: it would have to be re-run whole (15 min) for consistent outputs.
+- The exact h'R_xx h as the denominator: the run estimate is the literal E[(x_t' theta_t)^2]; it is printed beside
+  h'R_xx h (0.8177 / 0.8173, 1.0003 / 1).
+
+**Result**
+- Checks: KF with the Gaussian chi = textbook Kalman to 5e-14 across a flip, s_t to 3e-14; d - x'theta = eta to
+  4e-15; banks' s_t = the one from their recorded outputs to 1e-15; K = 1 bank = single filter bit for bit. The four
+  bank-notebook filters reproduce its printed numbers exactly in both scenarios.
+- **Full KF, AR(-0.9): 3.8x faster than the exact sKF** (1254 / 1972 steps from zero / after the flip, against
+  4756 / 7584), mean -15.63 dB against -14.08. Colour penalty (AR / white) 2.1 / 2.5 against 3.0 / 6.2 for the sKF
+  and 5.2 / 5.1 for the fKF: whitening takes away most of it, not all. White input: 603 / 791 steps, mean -17.65.
+- **Excess error, AR(-0.9): the banks' remaining misalignment is where the input has little power.** Gap (excess
+  floor - misalignment floor) -10.3 dB (sKF bank) and -8.3 dB (fKF bank; -10.7 without its spikes), against +1.0 /
+  +1.1 for the exact filters (+0.9 = an even spread, from h'R_xx h = 0.817) and -5.2 for the KF. By the excess error
+  the banks beat the single filters after the flip at every level; the sKF bank's mean excess error is -20.72 dB,
+  3.7 dB better than the exact sKF and level with the KF (-20.79). By the misalignment it is not (-13.89 / -14.08).
+- White input: excess error = misalignment to 0.15 dB (floors) and 0.1 dB (means), except the fKF bank's floor.
+- Spikes of the fKF bank: with white input 41 steps (8 realisations) carry 72 % of its last-quarter misalignment;
+  without them the gap is 0.00 and the floor -50.0 dB, not -44.6. Their s_t^2 came out at 0.57x their misalignment,
+  within the scatter of about 15 draws. With AR input 8 steps carry 43 % of E[s^2] and none of the misalignment; over
+  them the excess error is 157x the misalignment, near rho^2 M / h'R_xx h = 127 (the spike's error lies along
+  x_{t-1}, nearly parallel to x_t).
+- Open: which metric to report for the banks with coloured input.
+- Run time 45 min, most of it the KF search (13 min per scenario).
