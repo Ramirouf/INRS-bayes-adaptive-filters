@@ -1,0 +1,101 @@
+% Bank of full-covariance KFs, for Section 4.3 of main.tex (Overleaf fc54c65, PDF of 2026-09-30),
+% to follow Algorithm 2. Uses the draft's macros (\bx, \bw, \bSigma, \bI, \bg, \bzero, \T, \pdf)
+% and algpseudocode, as Algorithms 1 and 2. Equation numbers in the comments are those of that PDF.
+% Not compiled: there is no LaTeX installation on the machine where this was written.
+
+\paragraph{The bank of KFs}
+With the full family, filter $j$ holds a location $\bw_{t,j}$ and a
+covariance $\bSigma_{t,j}$. The mixing projects the mixture of the
+$K$ filters of the previous step, with the weights
+\eqref{bank.mixing.prob}, onto the full family, which matches its
+mean and its whole covariance,
+\eqref{Gaussian.projection.mean}--\eqref{Gaussian.projection.cov}
+with $\bSigma_t = \bC_t$:
+\begin{align}
+\label{KF.bank.mixing}
+    \bar{\bw}_{t,j} = \sum_{i=1}^K \mu_{t-1,i|j}\,\bw_{t-1,i},
+    \qquad
+    \bar{\bSigma}_{t,j} = \sum_{i=1}^K \mu_{t-1,i|j}
+      \Big(\bSigma_{t-1,i}
+      + (\bw_{t-1,i} - \bar{\bw}_{t,j})(\bw_{t-1,i} - \bar{\bw}_{t,j})\T\Big).
+\end{align}
+When every $\bSigma_{t-1,i}$ is scalar, the trace of
+$\bar{\bSigma}_{t,j}$ divided by $M$ is $\bar{v}_{t,j}$ of
+\eqref{bank.mixing}. Each filter then performs the KF step
+\eqref{KF.mean}, \eqref{KF.cov} from its own starting point:
+\begin{align}
+\label{KF.bank.update}
+    \tilde{\bSigma}_{t,j} &= \bar{\bSigma}_{t,j} + \varepsilon^{(j)}\bI,
+    \qquad
+    \sigma_{t,j}^2 = \bx_t\T\tilde{\bSigma}_{t,j}\bx_t,
+    \qquad
+    e_{t,j} = y_t - \bx_t\T\bar{\bw}_{t,j},
+    \nonumber\\
+    \bw_{t,j} &= \bar{\bw}_{t,j}
+       + \frac{\tilde{\bSigma}_{t,j}\bx_t}{\sigma_{t,j}^2}\,\chi_t(e_{t,j}),
+    \qquad
+    \bSigma_{t,j} = \tilde{\bSigma}_{t,j}
+       - \chi_t'(e_{t,j})\,
+         \frac{\tilde{\bSigma}_{t,j}\bx_t\bx_t\T\tilde{\bSigma}_{t,j}}
+              {\sigma_{t,j}^2},
+\end{align}
+where $\chi_t$ and $\chi_t'$ are evaluated with
+$\sigma_t^2 = \sigma_{t,j}^2$, by \eqref{Lap.chi} for Laplacian
+noise. The weights are \eqref{bank.weights} as written,
+$\mu_{t,j} \propto c_{t,j}\,\pdf_{t,j}(e_{t,j})$, with
+$\sigma_{t,j}^2$ of \eqref{KF.bank.update} in place of
+$\tilde{v}_{t,j}\|\bx_t\|^2$: under the predicted prior of filter
+$j$ the output deviation $\bx_t\T(\btheta_t - \bar{\bw}_{t,j})$ has
+the variance $\bx_t\T\tilde{\bSigma}_{t,j}\bx_t$, by
+\eqref{sigma.def}, and that is the variance of the Gaussian in its
+predictive density \eqref{predictive.density}. The output
+is \eqref{bank.output}, with
+$\hat{\bSigma}_t = \sum_j \mu_{t,j}\big(\bSigma_{t,j}
++ (\bw_{t,j} - \hat{\bw}_t)(\bw_{t,j} - \hat{\bw}_t)\T\big)$
+in place of $\hat{v}_t$. Algorithm~\ref{alg:bank.KF} summarizes the
+bank. It requires $O(KM^2)$ operations per step, the mixing
+included, since each $\bar{\bSigma}_{t,j}$ combines at most three
+covariances, and $O(KM^2)$ memory.
+% With Gaussian noise, chi from (chi.Gaussian), Algorithm 3 is the interacting multiple model
+% estimator for K random-walk models that differ in their increment variance, and
+% (KF.bank.mixing) is its mixing step (Blom & Bar-Shalom 1988; same TODO as at line 1233).
+
+\begin{algorithm}[t]
+\caption{Bank of KF filters with uncertain random-walk variance}
+\label{alg:bank.KF}
+\begin{algorithmic}[1]
+\Require grid $\varepsilon^{(1)}, \ldots, \varepsilon^{(K)}$,
+         transition probability $q$, noise scale $b_\eta$
+\State $\bw_{0,j} \gets \bzero$, $\bSigma_{0,j} \gets v_0\bI$,
+       $\mu_{0,j} \gets 1/K$ for $j = 1, \ldots, K$
+\For{$t = 1, 2, \ldots$}
+  \State receive $\bx_t$ and $y_t$
+  \For{$j = 1, \ldots, K$}
+    \Comment{mixing}
+    \State $c_{t,j} \gets \sum_i p_{ij}\mu_{t-1,i}$,\;
+           $\mu_{t-1,i|j} \gets p_{ij}\mu_{t-1,i}/c_{t,j}$
+    \State $\bar{\bw}_{t,j} \gets \sum_i \mu_{t-1,i|j}\bw_{t-1,i}$
+    \State $\bar{\bSigma}_{t,j} \gets \sum_i \mu_{t-1,i|j}
+           \big(\bSigma_{t-1,i}
+           + (\bw_{t-1,i}-\bar{\bw}_{t,j})(\bw_{t-1,i}-\bar{\bw}_{t,j})\T\big)$
+  \EndFor
+  \For{$j = 1, \ldots, K$}
+    \Comment{one KF step per value of $\varepsilon$}
+    \State $\tilde{\bSigma} \gets \bar{\bSigma}_{t,j} + \varepsilon^{(j)}\bI$,\;
+           $\sigma^2 \gets \bx_t\T\tilde{\bSigma}\bx_t$,\;
+           $e \gets y_t - \bx_t\T\bar{\bw}_{t,j}$
+    \State compute $\chi_t(e)$, $\chi_t'(e)$ and
+           $\log\pdf_{t,j}(e)$ with $\sigma^2$
+           \Comment{\eqref{Lap.chi}, \eqref{bank.weights}}
+    \State $\bg \gets \tilde{\bSigma}\bx_t/\sigma^2$,\;
+           $\bw_{t,j} \gets \bar{\bw}_{t,j} + \bg\,\chi_t(e)$,\;
+           $\bSigma_{t,j} \gets \tilde{\bSigma} - \chi_t'(e)\,\sigma^2\,\bg\bg\T$
+    \State $\ell_j \gets \log c_{t,j} + \log\pdf_{t,j}(e)$
+  \EndFor
+  \State $\mu_{t,j} \gets \exp(\ell_j - \max_i \ell_i)$, then
+         normalize so that $\sum_j \mu_{t,j} = 1$
+  \State $\hat{\bw}_t \gets \sum_j \mu_{t,j}\bw_{t,j}$
+         \Comment{output, \eqref{bank.output}}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
