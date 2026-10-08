@@ -488,6 +488,78 @@ def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
+def AWU_sKF_algorithm_v2(N, x, d, h0, parameters):
+  # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
+  h = np.copy(h0)
+  v = np.copy(parameters.v_tilde_0)
+  var_eta = np.copy(parameters.var_eta)
+
+  L = len(h)
+  float_L = np.float64(L)
+  
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # predict
+      norm = np.dot(xtemp, xtemp)
+      var_e = (var_eta + v*norm)
+      v *= 1.0 + v * norm * (e[k]**2)/(float_L*(var_e**2))
+      # update
+      s = var_eta + v * norm
+      h += xtemp * (v * e[k]/s)
+      v *= (1.0 - (v * norm) / (float_L * s)) 
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def AWU_sKF_L_algorithm_v2(N, x, d, h0, parameters):
+  # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
+  h = np.copy(h0)
+  b_eta = np.copy(parameters.b_eta)
+  v_tilde_0 = np.copy(parameters.v_tilde_0)
+
+  L = len(h)
+  float_L = np.float64(L)
+  
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  v=v_tilde_0
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # predict
+      norm = np.dot(xtemp, xtemp)
+      var_eta = b_eta * np.abs(e[k])
+      var_e = (var_eta + v*norm)
+      v *= 1.0 + v * norm * (e[k]**2)/(float_L*(var_e**2))
+      # update
+      s = var_eta + v * norm
+      h += xtemp * (v * e[k]/s)
+      v *= (1.0 - (v * norm) / (float_L * s)) 
+      
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
 def sKF_L_algorithm(N, x, d, h0, parameters):
     h = h0
     epsilon = parameters.epsilon
