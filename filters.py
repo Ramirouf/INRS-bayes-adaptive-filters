@@ -502,6 +502,10 @@ def _PBbar_update(PBar, k, NR):
         return
     warnings.warn(f'Unrecognized PBar type: {type(PBar)}')
 
+@njit(cache=True)
+def _seed_numba(seed):
+    np.random.seed(seed)  # inside njit this seeds numba's generator for the current thread
+
 def MC_Simulations(N, 
                    NR,
                    environment_parameters,
@@ -513,7 +517,8 @@ def MC_Simulations(N,
                    average = True,
                    seed = None):
     L = len(h0)
-    np.random.seed(seed)
+    if seed is not None:
+      _seed_numba(seed)
     N_Algorithms = len(Algorithms)
     measure_init = lambda taps, N_iter: {'h': np.zeros((N_iter, taps)),
                                          'J': np.zeros(N_iter),
@@ -615,19 +620,20 @@ def dask_MC_Simulations(N,
                         seed = None,
                         scheduler = "threads"):
     N_Algorithms = len(Algorithms)
-    seed_sequence = _get_seed_sequence(seed, num_chunks)
+    rest_of_realizations = NR % num_chunks
+    number_of_seeds = num_chunks + (1 if rest_of_realizations > 0 else 0)
+    seed_sequence = _get_seed_sequence(seed, number_of_seeds)
     num_chunks = _check_num_chunks(num_chunks, num_workers)
     _check_scheduler_value(scheduler)
     _check_numba_algorithms(Algorithms, scheduler)
 
-    rest_of_realizations = NR % num_chunks
     tasks = [delayed_chunked_iterations(
-        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = seed_sequence[k].generate_state(1)
+        N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = int(seed_sequence[k].generate_state(1)[0])
     ) for k in range(num_chunks)]
     
     if rest_of_realizations > 0:
         tasks.append(delayed_chunked_iterations(
-            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = seed_sequence[-1].generate_state(1)
+            N, rest_of_realizations, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = int(seed_sequence[-1].generate_state(1)[0])
         ))
     
     tasks_tree = create_tasks_tree(tasks)
