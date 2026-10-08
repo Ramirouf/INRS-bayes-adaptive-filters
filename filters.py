@@ -451,6 +451,43 @@ def AWU_sKF_algorithm(N, x, d, h0, parameters):
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
+def GISV_sKF_algorithm(N, x, d, h0, parameters):
+  # Gradient Informed System Variance Uncertainty Scalar Kalman Filter (GISV-sKF)
+  h = np.copy(h0)
+  var_eta = np.copy(parameters.var_eta)
+  v = np.copy(parameters.v_tilde_0)
+
+  L = len(h)
+  float_L = np.float64(L)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  # d: salida del sistema con ruido
+  # y: salida estimada
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # predict
+      norm = np.dot(xtemp, xtemp)
+      # update
+      s = var_eta + v * norm
+      g = (v * e[k]/s)
+      h += xtemp * g 
+      
+      epsilon = norm * (g**2) / float_L
+      v *= (1.0 - (v * norm) / (float_L * s))
+      v += epsilon
+      
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
 def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
   # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
   h = np.copy(h0)
