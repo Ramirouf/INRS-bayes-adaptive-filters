@@ -599,12 +599,12 @@ def _get_seed_sequence(seed, num_chunks):
     raise ValueError("Seed must be None or a non-negative integer")
 
 def _check_num_chunks(num_chunks, num_workers):
+    if num_chunks is None:
+            num_chunks = num_workers
     if num_chunks <= 0 or not isinstance(num_chunks, int):
         raise ValueError("num_chunks must be a positive integer")
     if num_chunks < num_workers:
         warnings.warn("num_chunks is less than num_workers. Setting num_chunks to num_workers.")
-        num_chunks = num_workers
-    if num_chunks is None:
         num_chunks = num_workers
     return num_chunks
 
@@ -620,12 +620,13 @@ def dask_MC_Simulations(N,
                         seed = None,
                         scheduler = "threads"):
     N_Algorithms = len(Algorithms)
-    rest_of_realizations = NR % num_chunks
-    number_of_seeds = num_chunks + (1 if rest_of_realizations > 0 else 0)
-    seed_sequence = _get_seed_sequence(seed, number_of_seeds)
     num_chunks = _check_num_chunks(num_chunks, num_workers)
     _check_scheduler_value(scheduler)
     _check_numba_algorithms(Algorithms, scheduler)
+    
+    rest_of_realizations = NR % num_chunks
+    number_of_seeds = num_chunks + (1 if rest_of_realizations > 0 else 0)
+    seed_sequence = _get_seed_sequence(seed, number_of_seeds)
 
     tasks = [delayed_chunked_iterations(
         N, NR//num_chunks, environment_parameters, environment, Algorithms, Parameters, h0, average = False, seed = int(seed_sequence[k].generate_state(1)[0])
