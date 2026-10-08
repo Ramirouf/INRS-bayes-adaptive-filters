@@ -606,3 +606,84 @@
   x_{t-1}, nearly parallel to x_t).
 - Open: which metric to report for the banks with coloured input.
 - Run time 45 min, most of it the KF search (13 min per scenario).
+
+## 2026-10-07 - The bank of KFs, the three banks at larger q, and Gaussian noise (`kf-bank-q-sweep.ipynb`)
+
+**Decided**
+- Leszek's four requests after the 2026-10-06 meeting: a bank of full KFs, with its equations and an algorithm in the
+  form of Algorithms 1 and 2 written before any code (`kf-bank-algorithm.tex`, for Section 4.3 of `main.tex`); the three
+  banks at larger q, at least four values; the median over the realisations instead of the mean; Gaussian noise
+  (beta* = 2) beside beta* = 0.2.
+- The bank of KFs: the mixing projects the mixture onto the full family (eqs. 12-13 with Sigma = C), so
+  Sigma_bar_{t,j} = sum_i mu_{t-1,i|j} (Sigma_{t-1,i} + (w_{t-1,i} - w_bar_{t,j})(w_{t-1,i} - w_bar_{t,j})'); each filter
+  takes the KF step (31)-(32); the weights are eq. (56) as written, with sigma^2 = x' Sigma~ x. This reverses the
+  2026-10-06 rejection of a bank of full KFs ("not in the draft, needs a merge rule for Sigma"): Leszek asked for it, and
+  the merge rule follows from the projection the draft already uses.
+- With Ramiro, before code: numba kernels for the O(K M^2) work (upper triangle only), scipy chi between them, and
+  Algorithm 3 in plain numpy as the reference of the checks; q in {1e-4, 1e-3, 1e-2, 1e-1, 1/3}; 3 banks x 5 q x
+  {AR(-0.9), white} x {beta* = 0.2, 2} on notebook 09's change test, beside the exact sKF, exact fKF and KF at -20 dB
+  (the earlier values at 0.2, tuned again at 2); under Gaussian noise the Laplacian likelihood with b_eta = E|eta|, so
+  only the noise changes; the median over the realisations with the 25-75 % band, the excess error's s_t^2 smoothed per
+  realisation before the median; tables from the mean and from the median curves; a new notebook; every run saved under
+  `results/` (git-ignored) as it finishes.
+- `bank-kf-excess-error.ipynb` committed first (`f2ded06`), so the new notebook copies from a commit.
+- Figures as PNG (retina) instead of svg: about two million plotted points.
+- When a -20 dB search finds no settled grid point, it picks among all of them and says so (`pick` needs one settled
+  point; found in a short test run). Not triggered in the real run.
+
+**Why**
+- The median, measured on the four filters of the last notebook before deciding: the misalignment's median moves by
+  0.05 dB from one step to the next against 0.025 dB for the mean, and its floor is within 0.1 dB of the mean's, except
+  the fKF bank's, whose spikes vanish. The excess error needs the per-realisation smoothing first: the median of 20 raw
+  squares jitters by 3 dB and reads 3-8 dB low.
+- q = 1/3: an inner grid value then moves to each neighbour as often as it stays, which is the end of persistence
+  (q <= 1/2 is the hard limit of eq. 52).
+- Numba: one step of the bank (K = 6, B = 20, M = 128) takes 2 ms against 12 ms in plain numpy, so a rest and change
+  run takes about 10 min instead of 58.
+
+**Rejected**
+- dask, Augusto's PR #16 (asked by Ramiro during the session; measured with scratch scripts):
+  - its core idea, chunks of realisations per worker, does not fit filters that already run the 20 realisations side
+    by side: the sKF bank takes 0.30 ms a step for 20 realisations and 0.18 ms for 5, so four chunks of five on four
+    processes gain 1.7x at most;
+  - whole runs in parallel processes do help the numpy banks, 3.6x with 4 at once and 4.5x with 8, but the KF banks, two
+    thirds of the run time, are already parallel inside each run: 1.00x with 2 runs x 4 threads, 1.11x with 4 x 2,
+    1.19x with 8 x 1;
+  - so about 5.2 h would have become about 3.9 h, for a new dependency (dask is not installed; the PR's requirements.txt
+    does not install on macOS), notebook functions shipped to worker processes, numba threads to pin per worker and
+    harder debugging. If sweeps become routine: a process pool over whole runs of the numpy filters (joblib is lighter
+    than dask for that) and a faster KF-bank kernel.
+- The numpy-only KF bank (58 min per run, about 20 h for the sweep).
+- The Gaussian likelihood under Gaussian noise: one change at a time; a possible follow-up.
+
+**Result**
+- Checks: the numba code against Algorithm 3 in numpy agrees to 1e-13 with the Gaussian chi, and within the one-ulp
+  yardstick with the Laplacian chi (6.5e-7 against 1.2e-6). The Laplacian filters amplify rounding (k ~ 125 at the first
+  updates, where log_mills cancels terms of ~7800), so bit for bit is not a test for this bank. K = 1 is KF_batch,
+  q = 0 gives eq. (58), the second mixing gives eq. (54) to 8e-11, the Gaussian chi gives a textbook IMM to 2e-15, and
+  the brute force over eps sequences is exact at the first update and at q = 0.
+- Anchor: Leszek's bank of full KFs (`sims/driftkf.py`) reproduced, -8.17 / -10.69 dB against the draft's -8.2 / -10.7.
+  Control: the five filters run before give their printed floor, steps, recovery and mean exactly, in both scenarios.
+- **The KF bank, AR(-0.9), beta* = 0.2, q = 1e-4:** floor -41.9 dB, -15 dB after the flip in 729 steps, mean over the
+  record -20.55 dB, against -15.63 (KF at -20 dB), -14.08 (exact sKF) and -13.89 (sKF bank): the full covariance gives
+  the bank what coloured input took from the sKF and fKF banks. With white input it is about 1 dB better than the other
+  banks. 10 min per rest and change run.
+- **Larger q helps only with AR input, and clearly only for the sKF bank with beta* = 0.2.** At q = 0.1 it reaches
+  -15 dB after the flip in 5 300 steps (31 119 at q = 1e-4; exact sKF 6 497), mean -16.52 dB. With Gaussian noise the
+  AR-input sKF and fKF banks gain 1.9 and 1.5 dB (best at q = 1e-2 and 1/3), still well behind the KF bank. The KF bank
+  never gains (0.02 dB at most). Elsewhere the floor rises much faster than the recovery speeds up (KF bank, white:
+  floors -45.1, -44.7, -39.2, -26.0, -13.5 dB, -15 dB after the flip at 477, 472, 467, 493, 43 737 steps). The best q is
+  1e-4 or 1e-3 in 9 cases of 12, and q = 1/3 is the worst in 11 of 12 (corrected after meeting-prep-8-16 checked the
+  numbers for the email).
+- **The median** changes no conclusion: same best q in 11 of 12 cases (a tie within 0.01 dB in the 12th); floors
+  within 0.25 dB of the mean's except the fKF bank's (-50.05 against -44.58 dB, white); record means up to 1.3 dB lower
+  for the KF and the KF bank with AR input.
+- **Gaussian noise**: the Laplacian filters see b_eta = 0.41 instead of 0.13 at the same variance. With white input the
+  single filters at -20 dB need a 30x smaller eps and recover ~9x more slowly, so the banks gain ~7 dB on the record
+  mean (5.4-6.3 dB at beta* = 0.2), with floors near -20 dB instead of -45. With AR input no single filter reaches
+  -20 dB within the run (deepest settled floors -18.7 / -16.4 / -19.0 dB), so that comparison is not at an equal floor.
+  With white input every bank is best at q = 1e-4.
+- Open: single filters at -20 dB with AR input and Gaussian noise (a longer run, a lower grid); the Gaussian likelihood
+  under Gaussian noise; the weights against time at larger q.
+- Run time 312 min for the whole notebook, of which 281 min the 72 runs and most of the rest the two KF searches under
+  Gaussian noise; run again with the runs saved under `results/` (140 MB) it takes 3.5 min.
