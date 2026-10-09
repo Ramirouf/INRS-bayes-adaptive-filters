@@ -40,3 +40,4 @@ traitlets==5.16.1
 typing_extensions==4.16.0
 wcwidth==0.8.3
 numba-progress==1.2.0
+dask==2026.8.0
