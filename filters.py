@@ -415,6 +415,75 @@ def sKF_algorithm(N, x, d, h0, parameters):
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
+def sKF_clip_algorithm(N, x, d, h0, parameters):
+  h = np.copy(h0)
+  epsilon = np.copy(parameters.epsilon)
+  b_eta = np.copy(parameters.b_eta)
+  v = np.copy(parameters.v_tilde_0)
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  # d: salida del sistema con ruido
+  # y: salida estimada
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # predict
+      v += epsilon
+      # update
+      norm = xtemp @ xtemp
+      tau = v*norm/b_eta
+      g = np.sign(e[k]) * min(np.abs(e[k]), tau) / (norm + 1e-15)
+      h += xtemp * g
+      v *= (1 - (1/L) * (1 if np.abs(e[k]) < tau else 0)) 
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def AWU_sKF_clip_algorithm(N, x, d, h0, parameters):
+  h = np.copy(h0)
+  b_eta = np.copy(parameters.b_eta)
+  v = np.copy(parameters.v_tilde_0)
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  # d: salida del sistema con ruido
+  # y: salida estimada
+  for k in range(0,N):
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      norm = xtemp @ xtemp
+      # predict
+      tau = v*norm/b_eta
+      v *= (1 - (1/L) * (1 if np.abs(e[k]) < tau else 0))
+      v += min(np.abs(e[k]), tau)**2
+      # update
+      tau = v*norm/b_eta
+      g = np.sign(e[k]) * min(np.abs(e[k]), tau) / (norm + 1e-15)
+      h += xtemp * g
+      v *= (1 - (1/L) * (1 if np.abs(e[k]) < tau else 0)) 
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
 def AWU_sKF_algorithm(N, x, d, h0, parameters):
   # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
   h = np.copy(h0)
