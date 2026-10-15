@@ -687,3 +687,148 @@
   under Gaussian noise; the weights against time at larger q.
 - Run time 312 min for the whole notebook, of which 281 min the 72 runs and most of the rest the two KF searches under
   Gaussian noise; run again with the runs saved under `results/` (140 MB) it takes 3.5 min.
+
+## 2026-10-08 - The sKF bank with q switched by an error detector (`skf-bank-q-switch.ipynb`)
+
+**Decided**
+- Ramiro asked whether q can change during a run, then for the cheapest real test, as simple as possible. q only enters
+  the mixing through p_ij, so a q_t that depends on y_1..y_{t-1} is a drop-in change (Algorithm 1 with p_ij(t)).
+- The test: the sKF bank, AR(-0.9), beta* = 0.2, the change run only (2N steps), 20 realisations. Per realisation a
+  detector: the running share (lambda = 0.01, about 100 steps) of |e_t| > b_eta on the bank's output error, on above
+  1/2; q = 1e-2 when off, 0.1 when on. Baselines: the same function with q fixed at 1e-2 and 0.1, which are also the
+  control against the sweep's numbers. `bank_step` copied with one line changed (log_P is (K, K, B)).
+
+**Why**
+- The sKF bank is the cheapest bank (about 1 min per change run) and the one case of the sweep where q changes the
+  recovery a lot. 1e-2 had the lowest floor at rest (-38.4 dB), 0.1 the fastest recovery (5 300 steps to -15 dB).
+- The level |e_t| > b_eta: with beta* = 0.2 noise it is exceeded in 19 % of steps at rest and 51 % with an excess error
+  15 dB below the signal (Monte Carlo), so the detector stays on until the excess error is about -15 dB. A running mean
+  of |e_t| was rejected: one heavy-tailed sample (up to a few hundred b_eta) would trigger it.
+
+**Rejected**
+- A rest run (the floor is read before the flip in the change run instead), a hold time, a learned q (online EM), a
+  Bayesian average over a q grid: kept for later if this test says switching is worth it.
+
+**Result**
+- Control exact (15 931 / 5 300 steps, -15.28 / -16.52 dB).
+- Switched: floor -38.9 dB (like q = 1e-2; 11 dB below q = 0.1), -15 dB after the flip in 11 730 steps (26 % faster than
+  1e-2, 2.2 times slower than 0.1), mean over the record -15.87 dB (between -15.28 and -16.52). No false alarms at rest.
+- The detector turns off about 2 800 steps after the flip, with the misalignment still at about -10 dB: with AR input
+  the output error recovers long before the misalignment, so a detector on e_t alone stops too early.
+- Run time 3 min.
+
+## 2026-10-13 - Augusto's adaptive-variance sKFs beside the banks (`awu-gisv-vs-banks.ipynb`)
+
+**Decided**
+- Ramiro asked to compare the filters of Augusto's last commits on `time_varying_system` (2026-10-06 to 10-08, up to
+  `6a27d96`) with our suite. Five filters, none with an eps, each moving v by its own rule: AWU-sKF v1 and v2 and
+  GISV-sKF (Gaussian likelihood), AWU-sKF-L v1 and v2 (minorized Laplacian, v_eta replaced by b_eta|e_t|).
+- With Ramiro, before code: our scenario (notebook 09's change test, the four scenarios of `kf-bank-q-sweep.ipynb`);
+  our six filters read from `results/kf-bank-q-sweep/`, recomputed only if a file is missing; all five of his filters
+  copied verbatim from `filters.py` at `6a27d96`, with v_eta = the true noise variance, b_eta = E|eta| and v0 = 2; beside
+  them their base filters (his `sKF_algorithm` and `sKF_L_algorithm`) with eps tuned to -20 dB by notebook 09's search;
+  the banks at q = 1e-4 and at their best q of the sweep. Ramiro's limit: the notebook must run in under 6.5 h.
+- His filters run through his own numba code, one realisation at a time; the misalignment and s_t are formed from his
+  outputs (`h[t]` = w_{t-1}, `y[t]` = x_t' w_{t-1}). The base filters' search uses `sKF_batch` with `chi_gaussian` and
+  `chi_minorized` (from `fkf.ipynb`), checked equal to his base filters.
+- Added during the work: a 3 s check of his five filters in his own setup (L = 16, sinc response, white input, his two
+  noises), and the figures over the whole kept window, 2.5 s after the change, with white input too (0.6 s before).
+
+**Why**
+- Reading the saved runs makes the notebook take 3 min instead of about 2 h more, and every number read is checked
+  against the one `kf-bank-q-sweep.ipynb` printed.
+- The base filters separate each rule from its likelihood.
+- A scratch probe showed the AWU-sKF-L filters freezing after the flip; without the check in his setup that could be
+  put down to our scenario. With white input his filters and the base filters are still recovering at 0.6 s.
+
+**Rejected**
+- His setup for the whole comparison: every filter of ours would run again there, and -20 dB does not fit his 30 dB SNR.
+- His rules on our exact Laplacian chi (GISV with it is the "eq. (76) of [5]" entry of the draft's Remark 6): new code,
+  not his filters. Kept for later.
+- His Gaussian filters at beta* = 2 only: running them everywhere puts the cost of the Gaussian likelihood under
+  heavy-tailed noise on the record.
+
+**Result**
+- Checks: his base filters = `sKF_batch` with the Gaussian / minorized chi to 3e-15; GISV-sKF adds ||w_t - w_{t-1}||^2/M
+  to v to 2e-16, so it is the estimator of the draft's Remark 5; our numbers read from the cache match their printed
+  values exactly, and BEST_Q matches the saved sweep in 12 cases of 12. His minorized sKF-L at -20 dB gives notebook
+  09's minorized filter to the step (4 357 steps from zero, 7 340 to recover).
+- **AWU-sKF-L v1 and v2 freeze.** After the flip they stay near +6 dB (the old response) to the end of the run, in all
+  four scenarios and in his own setup; mean over the record +0.1 to +3.0 dB. Their v shrinks whenever |e_t| < b_eta
+  (81 % of the steps at rest with beta* = 0.2, 58 % with Gaussian noise), falls through the rest run to 1e-9 - 6e-7 and
+  does not rise after the flip. To pass on to Augusto.
+- **AWU-sKF v2 and GISV-sKF are one filter in practice**: the same amount added to v, one step apart; means within
+  0.6 dB. Both beat their base (the Gaussian sKF at -20 dB) in every scenario, by 0.2 to 2.6 dB on the mean over the
+  record; their v jumps 25 to 67 times at the flip.
+- **AWU-sKF v1** beats its base only with white input and Gaussian noise: -19.65 dB, the best mean of all filters there,
+  0.8 dB ahead of the KF bank. Elsewhere it is worse than its base, and with AR input and beta* = 0.2 it does not
+  converge (floor -2.7 dB).
+- **Against ours.** With beta* = 0.2 every filter of ours is ahead of every filter of his: GISV-sKF -8.37 / -15.27 dB
+  (AR / white) against -14.08 / -17.22 for the exact sKF and -20.55 / -23.92 for the KF bank; most of the gap is the
+  Gaussian likelihood (the Gaussian sKF at -20 dB is 6.7 / 2.7 dB behind the exact sKF). With Gaussian noise, where only
+  his likelihood is the right one, AWU-sKF v2 and GISV-sKF beat our single filters by 3.8 to 6.0 dB and, with AR input,
+  the sKF and fKF banks; the KF bank stays ahead with AR input (-14.09 against -11.80), and all three banks with white
+  input. With AR input the KF bank is the best filter in both noises.
+- Run time 3.0 min, of which 1.7 min the new runs; 18 s when run again from the saved runs.
+
+## 2026-10-15 - The review's convex combination beside our bank (`cvx-combination-vs-bank.ipynb`)
+
+**Decided**
+- At the meeting after `awu-gisv-vs-banks.ipynb`, Augusto said the bank of filters already exists and Leszek asked for
+  references and a comparison. Augusto sent Arenas-García et al., "Combinations of adaptive filters", IEEE SPM, Jan.
+  2016 (DOI 10.1109/MSP.2015.2481746), and pointed to its convex combination with weight sharing, gradual transfer first.
+- Ramiro chose, from three options, the middle one: the convex combination only (cvx-PN-LMS, the review's Table 4),
+  two filters, with each of its four sharing choices (none, gradual transfer, simple copy, feedback; Table 5), in our
+  main scenario. Then he asked for a Gaussian-noise run beside it, since the review's cost is the squared error.
+- The details were set by Claude while Ramiro was away, from the defaults proposed to him, not reviewed by him: the same
+  two sKFs (exact Laplacian chi) under both layers, so that only the layer differs. Slow = the exact sKF at -20 dB
+  (1.3493e-6 at beta* = 0.2; 1e-7 at beta* = 2, the deepest settled point of `kf-bank-q-sweep.ipynb`'s search), fast =
+  1e-4 (the top of the bank grid). Ours on the same pair: Algorithm 1 with K = 2. a+ = 4, eta = 0.9, a_0 = 0; only w is
+  shared, each sKF keeps its own v. AR(-0.9) input, beta* = 0.2 and 2; under Gaussian noise ours keep the Laplacian
+  likelihood, as in `kf-bank-q-sweep.ipynb`.
+- Every setting run, each scheme reported at its best (lowest mean over the record, mean curves), as the banks' best q
+  before: mu_a, ell, N0 and lambda0 for the combination, q for the bank of the two.
+- The grid grew twice, during the work: lambda0 = 0.98 alone at first, then {0.98, 0.9, 0.7}, then also 0.5 and
+  mu_a = 3. Runs already saved keep their file names, so each rerun only adds the new settings.
+
+**Why**
+- The same components under both layers isolate the combination layer, which is the part the review and our bank do
+  differently (gradient on e^2 through a sigmoid against posterior weights; hand-set transfer rules against the mixing
+  step).
+- lambda0: with 0.98, gradual transfer and simple copy fired almost only in the first few hundred steps (the same
+  count, about 125 steps, in the rest run and the change run), where lambda_t jumps between its bounds while the two
+  filters are still nearly equal; for mu_a <= 0.3 they gave the numbers of "none". The schemes would have been judged
+  by a threshold they never reach.
+- mu_a = 3 and lambda0 = 0.5: in the second run the combination's best settings sat at mu_a = 1 and lambda0 = 0.7, the
+  edges of the grid, in both noises, and the margin at beta* = 0.2 was 0.28 dB.
+
+**Rejected**
+- The affine combination, K > 2 (softmax, hierarchical), KF components, white input, the review's own figures: not in
+  the option Ramiro chose.
+- A robust mixing rule for impulsive noise (sign error, correntropy; found by a web search, papers not read): not in
+  the review, and the review's rule is what was asked for.
+- Copying the review's PDF into the repo: IEEE copyright.
+
+**Result**
+- Checks: inside the combination each sKF is `sKF_batch` bit for bit; schemes that never fire give "none" bit for bit;
+  against Tables 4 and 5 written line by line the output's misalignment agrees within 1.5e-9, the size of the one-ulp
+  yardstick (lambda_t itself differs by up to 0.96 on a few early steps, as between the reference and itself one ulp
+  apart); the bank of the two at q = 0 is the two sKFs bit for bit. Control: ours read from the cache give the printed
+  means exactly.
+- beta* = 0.2: our bank of the two (q = 1e-4) -15.28 dB mean over the record, the best combination (gradual transfer
+  or simple copy, mu_a = 1, lambda0 = 0.7) -15.00, none -14.68, the slow sKF -14.08. Our bank reaches -15 dB after the
+  flip 6 % sooner (4 605 against 4 896 steps) and -20 dB 15 % sooner. Excess error: all two-filter methods within
+  0.3 dB. Best settings inside the grid.
+- beta* = 2: the best combination (simple copy, mu_a = 1, N0 = 10, lambda0 = 0.5; gradual transfer 0.01 dB behind)
+  -12.23 dB, our bank of the two (q = 1e-2) -10.49, the bank of six at its best q -10.53. Our bank of the two keeps
+  13 % of its weight on the fast sKF at rest, so its floor is -12.2 dB against -18.6 for the combination; at
+  q = 1e-4 it keeps 0.3 % but follows the flip much later. Probably the Laplacian density of its weights under Gaussian
+  noise; not checked. Best settings at an edge of the grid (mu_a = 3, lambda0 = 0.5); the top is flat (five other
+  settings within 0.15 dB).
+- Sharing: at q = 0 our bank is the slow sKF in both noises (the fast sKF's weight stays 0.000 after the flip); the
+  combination without sharing gains 0.6 / 2.4 dB over the slow sKF. With lambda0 = 0.98 gradual transfer and simple
+  copy fire almost never after the flip; with lambda0 <= 0.9 and mu_a >= 1 they gain 0.3 / 3.1 dB over "none".
+  Gradual transfer and simple copy are one scheme in practice; feedback is the weakest.
+- Open: our bank with the Gaussian density in its weights under Gaussian noise (the like-for-like test); the softmax
+  combination of the six sKFs against our bank of six.
+- Run time: the 350 runs took 146 min (three passes as the grid grew); rerun from `results/` about 10 s.
