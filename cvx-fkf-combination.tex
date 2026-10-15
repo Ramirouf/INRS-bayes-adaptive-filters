@@ -1,0 +1,164 @@
+% Convex combination of two fKFs (cvx-PN-LMS of the review) with the weight sharing of the review's Table 5, written in
+% the form of Algorithm 2 of main.tex (Overleaf fc54c65, PDF of 2026-09-30), for the comparison in
+% cvx-fkf-combination-vs-bank.ipynb. Equation numbers: (R..) the review, (D..) that PDF of the draft.
+% The review: J. Arenas-Garcia, L. A. Azpicueta-Ruiz, M. T. M. Silva, V. H. Nascimento, A. H. Sayed, "Combinations of
+% adaptive filters: performance and convergence properties", IEEE Signal Processing Magazine, Jan. 2016.
+% Compile: tectonic cvx-fkf-combination.tex
+\documentclass[11pt]{article}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{float}
+
+% the draft's macros
+\newcommand{\bx}{\boldsymbol{x}}
+\newcommand{\bw}{\boldsymbol{w}}
+\newcommand{\bzero}{\boldsymbol{0}}
+\newcommand{\T}{^{\mathsf T}}
+\newcommand{\pdf}{f}
+\newcommand{\sgm}{\operatorname{sgm}}
+
+\title{Convex combination of two fKFs with weight sharing}
+\date{2026-10-15}
+\author{}
+
+\begin{document}
+\maketitle
+
+The review combines LMS and NLMS filters. Here its convex combination (cvx-PN-LMS, its eq.~(17) and Table~4) and its
+sharing schemes (Table~5) are written for two fKFs, the filters of Algorithm~2 of the draft. Both methods then run the
+same two filters, and only the weights and the sharing differ. (R$n$) is an equation of the review, (D$n$) one of the
+draft.
+
+\section*{1. The component: the fKF as a variable-step NLMS}
+
+Filter $k$ has the fixed predicted variance $v^{(k)}$ (D37):
+\begin{equation}
+  e_{t,k} = y_t - \bx_t\T\bw_{t-1,k}, \qquad
+  \sigma_{t,k}^2 = v^{(k)}\|\bx_t\|^2, \qquad
+  \bw_{t,k} = \bw_{t-1,k} + \frac{\bx_t}{\|\bx_t\|^2}\,\chi_t(e_{t,k}),
+  \label{fkf}
+\end{equation}
+with $\chi_t$ evaluated with $\sigma_{t,k}^2$, by (D43) for Laplacian noise. Written as an NLMS update,
+\begin{equation}
+  \bw_{t,k} = \bw_{t-1,k} + \mu_{t,k}\,\frac{\bx_t\,e_{t,k}}{\|\bx_t\|^2}, \qquad
+  \mu_{t,k} = \frac{\chi_t(e_{t,k})}{e_{t,k}} .
+  \label{vss}
+\end{equation}
+The step $\mu_{t,k}$ changes at every step with the error and with $\sigma_{t,k}$. Since $\chi_t$ is odd and
+$0 \le \chi_t' \le 1$ for log-concave noise, $\mu_{t,k} \in [0, 1]$. For Gaussian noise (D38),
+$\mu_{t,k} = v^{(k)}\|\bx_t\|^2 / (v^{(k)}\|\bx_t\|^2 + v_\eta)$, the regularized NLMS. For Laplacian noise
+$|\chi_t| < \sigma_{t,k}^2/b_\eta$, so an outlier moves $\bw_{t,k}$ by a bounded amount. The variance $v^{(k)}$ plays the
+role of the review's step size: filter 1 is the fast one and filter 2 the slow one, $v^{(1)} > v^{(2)}$.
+
+\section*{2. The combination: cvx-PN-LMS}
+
+The output (R2)--(R4), with the sigmoid (R15):
+\begin{gather}
+  \lambda_t = \sgm(a_t) = \frac{1}{1 + e^{-a_t}}, \qquad
+  \hat\bw_{t-1} = \lambda_t\bw_{t-1,1} + (1 - \lambda_t)\bw_{t-1,2}, \nonumber\\
+  e_t = y_t - \bx_t\T\hat\bw_{t-1} = \lambda_t e_{t,1} + (1 - \lambda_t)e_{t,2} .
+  \label{output}
+\end{gather}
+With $\hat y_{t,k} = \bx_t\T\bw_{t-1,k}$, $\partial e_t/\partial\lambda_t = -(\hat y_{t,1} - \hat y_{t,2})$ and
+$d\lambda_t/da_t = \lambda_t(1 - \lambda_t)$. A stochastic gradient step on $e_t^2$, normalized by the power of
+$\hat y_{t,1} - \hat y_{t,2}$, gives (R17), Table~4:
+\begin{align}
+  p_t &= \gamma\,p_{t-1} + (1 - \gamma)(\hat y_{t,1} - \hat y_{t,2})^2,
+  \label{power}\\
+  a_{t+1} &= \Big[\,a_t + \frac{\mu_a}{p_t}\,\lambda_t(1 - \lambda_t)\,e_t\,(\hat y_{t,1} - \hat y_{t,2})\Big]_{-a^+}^{a^+},
+  \label{cvx}
+\end{align}
+where $[\,\cdot\,]_{-a^+}^{a^+}$ clips to $[-a^+, a^+]$ ($a^+ = 4$ in the review). $\gamma$ is the review's $\eta$,
+renamed because $\eta_t$ is the noise here. $p_t = 0$ only while $\hat y_{t,1} = \hat y_{t,2}$, for example while both
+filters are still at $\bzero$; $a_t$ is not moved then. Nothing in \eqref{output}--\eqref{cvx} depends on the
+component filters. Replacing the review's LMS filters by fKFs changes only how $\hat y_{t,k}$ and $\bw_{t,k}$ are
+produced.
+
+\section*{3. Weight sharing: the review's Table 5}
+
+After both filters' step \eqref{fkf}, with this step's $\lambda_t$:
+
+\begin{center}
+\small
+\begin{tabular}{llll}
+\toprule
+scheme & condition & rule & parameters \\
+\midrule
+none & & & \\
+gradual transfer & $\lambda_t \ge \lambda_0$ &
+  $\bw_{t,2} \gets \ell\,\bw_{t,2} + (1 - \ell)\,\bw_{t,1}$ & $0 < \ell < 1$, $0 \ll \lambda_0 < 1$ \\
+simple copy & $\lambda_t \ge \lambda_0$ and $t = mN_0$ &
+  $\bw_{t,2} \gets \bw_{t,1}$ & $N_0 \ge 2$, $0 \ll \lambda_0 < 1$ \\
+feedback & $t = mN_0$ &
+  $\bw_{t,1}, \bw_{t,2} \gets \lambda_t\bw_{t,1} + (1 - \lambda_t)\bw_{t,2}$ & $N_0 \ge 2$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The fKF carries no state other than $\bw_{t,k}$, so sharing $\bw$ shares the whole filter. With the sKFs of
+\texttt{cvx-combination-vs-bank.ipynb} each filter kept its own $v$. The schemes are written from the review only; its
+references [47]--[49] were not read.
+
+\section*{4. Against Algorithm 2 with $K = 2$}
+
+Both methods run the two fKF steps \eqref{fkf}. They differ in two places.
+
+\paragraph{The weight.} The combination learns $\lambda_t$ by the gradient \eqref{cvx} on the squared output error.
+The bank uses the posterior $\mu_{t,j} \propto c_{t,j}\,\pdf_{t,j}(e_{t,j})$ (D56), from each filter's predictive
+density at its own error.
+
+\paragraph{The sharing.} The bank shares through its mixing (D53)--(D54), at every step and before the update. With
+$K = 2$ the transitions (D52) are $p_{12} = p_{21} = q$, and the mixing for filter 2 reads
+\begin{equation}
+  \bar\bw_{t,2} = \ell_{t,2}\,\bw_{t-1,2} + (1 - \ell_{t,2})\,\bw_{t-1,1}, \qquad
+  \ell_{t,2} = \frac{(1 - q)\,\mu_{t-1,2}}{(1 - q)\,\mu_{t-1,2} + q\,\mu_{t-1,1}},
+  \label{mixing}
+\end{equation}
+and the same with the indices swapped for filter 1. This is the gradual transfer of Table~5 with three differences:
+$\ell_{t,j}$ is set at every step by the weights and $q$, not fixed by hand; there is no threshold, since $\ell_{t,2}$
+is close to 1 while the slow filter is probable and drops when the fast one takes over; and it runs in both
+directions. Each filter then steps from $\bar\bw_{t,j}$, not from $\bw_{t-1,j}$.
+
+\begin{algorithm}[H]
+\caption{Convex combination of two fKF filters (cvx-PN-LMS) with weight sharing}
+\label{alg:cvx.fKF}
+\begin{algorithmic}[1]
+\Require fixed predicted variances $v^{(1)} > v^{(2)}$ (fast, slow), step $\mu_a$, forgetting factor $\gamma$,
+         bound $a^+$, noise scale $b_\eta$; a sharing scheme and its parameters ($\ell$, $\lambda_0$, $N_0$)
+\State $\bw_{0,k} \gets \bzero$ for $k = 1, 2$; $a_1 \gets 0$, $\lambda_1 \gets 1/2$, $p_0 \gets 0$
+\For{$t = 1, 2, \ldots$}
+  \State receive $\bx_t$ and $y_t$
+  \For{$k = 1, 2$}
+    \Comment{one fKF step per filter}
+    \State $\sigma^2 \gets v^{(k)}\|\bx_t\|^2$,\; $\hat y_k \gets \bx_t\T\bw_{t-1,k}$,\; $e_k \gets y_t - \hat y_k$
+    \State $\bw_{t,k} \gets \bw_{t-1,k} + \bx_t\,\chi_t(e_k)/\|\bx_t\|^2$
+  \EndFor
+  \State $e \gets y_t - \lambda_t\hat y_1 - (1 - \lambda_t)\hat y_2$,\;
+         $p_t \gets \gamma p_{t-1} + (1 - \gamma)(\hat y_1 - \hat y_2)^2$
+         \Comment{cvx-PN-LMS, \eqref{output}--\eqref{power}}
+  \State $a_{t+1} \gets a_t + \mu_a\lambda_t(1 - \lambda_t)\,e\,(\hat y_1 - \hat y_2)/p_t$ if $p_t > 0$, else $a_t$;
+         clip to $[-a^+, a^+]$
+         \Comment{\eqref{cvx}}
+  \If{gradual transfer and $\lambda_t \ge \lambda_0$}
+    \Comment{sharing, Table 5}
+    \State $\bw_{t,2} \gets \ell\,\bw_{t,2} + (1 - \ell)\,\bw_{t,1}$
+  \ElsIf{simple copy and $\lambda_t \ge \lambda_0$ and $t = mN_0$}
+    \State $\bw_{t,2} \gets \bw_{t,1}$
+  \ElsIf{feedback and $t = mN_0$}
+    \State $\bw_{t,1}, \bw_{t,2} \gets \lambda_t\bw_{t,1} + (1 - \lambda_t)\bw_{t,2}$
+  \EndIf
+  \State $\lambda_{t+1} \gets \sgm(a_{t+1})$,\;
+         $\hat\bw_t \gets \lambda_{t+1}\bw_{t,1} + (1 - \lambda_{t+1})\bw_{t,2}$
+         \Comment{output}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\noindent The output $\hat\bw_t$ is formed after the sharing, with the new weight $\lambda_{t+1}$, as $\hat\bw_t$ of
+Algorithm~2 is formed with $\mu_{t,j}$. It is the vector that predicts $y_{t+1}$. The algorithm takes the operations
+of two fKFs plus $O(M)$ for the combination, and $O(M)$ more on the steps where a scheme shares.
+
+\end{document}

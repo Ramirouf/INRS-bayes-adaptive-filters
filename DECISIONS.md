@@ -832,3 +832,55 @@
 - Open: our bank with the Gaussian density in its weights under Gaussian noise (the like-for-like test); the softmax
   combination of the six sKFs against our bank of six.
 - Run time: the 350 runs took 146 min (three passes as the grid grew); rerun from `results/` about 10 s.
+
+## 2026-10-15 - The review's convex combination of two fKFs beside our bank of two fKFs (`cvx-fkf-combination-vs-bank.ipynb`)
+
+**Decided**
+- Ramiro asked to repeat `cvx-combination-vs-bank.ipynb` with the variable-step NLMS of Algorithm 2 (the fKF) in place of
+  the review's LMS filters: our bank of two fKFs against cvx-PN-LMS with no sharing and the three schemes of Table 5, to
+  compare the draft's weight sharing with the review's. First, the combination written out, since the review does not
+  have it for fKFs: `cvx-fkf-combination.tex`, rendered to `cvx-fkf-combination.pdf` with tectonic. It covers the fKF as
+  a variable-step NLMS (mu_t = chi(e)/e), cvx-PN-LMS, Table 5 and an algorithm in the form of Algorithm 2.
+- The forgetting factor of p_t is written gamma (the review's eta), since eta_t is the noise in the draft.
+- Ramiro chose the setup of the sKF notebook with only the filters changed, in both noises. Slow fKF = the fKF at -20 dB
+  (2.985e-4 at beta* = 0.2; 3.162e-4, the deepest settled point, at beta* = 2). Fast fKF = 1e-2, the top of V_BANK.
+  The same mu_a, ell, N0 and lambda0 grids, the bank of the two at q in {0, 1e-4, 1e-3, 1e-2, 0.1, 1/3}, and the bank of
+  nine beside, read from the cache (best q 1e-4 / 1/3).
+- Added during the work: check 4.4 (with K = 2, the bank's mixing equals eq. (6) of the LaTeX file, a gradual transfer
+  with ell_t = (1-q)mu_j/((1-q)mu_j + q mu_i)), and section 9, a diagnostic of the bank of the two with every weight and
+  density recorded, after it failed at beta* = 0.2.
+
+**Why**
+- The same two filters under both layers isolate the layer. The fKF has no state besides w, so sharing w shares the
+  whole filter, unlike the sKF.
+- Eq. (6) is the direct link between the two kinds of sharing. Checking it on `bank_step` itself makes sure the LaTeX
+  file describes the code that was run.
+
+**Rejected**
+- A closer pair of v for the bank, or another density in its weights, to rescue it at beta* = 0.2: not the setup that
+  was chosen. Left as next steps.
+
+**Result**
+- Checks: each fKF inside the combination = `fKF_batch` bit for bit; schemes that never fire = "none" bit for bit;
+  against Algorithm 1 line by line within 7e-13 (one-ulp yardstick 4e-13), lambda_t equal on every step; the bank at
+  q = 0 = the two fKFs bit for bit; eq. (6) to 1.3e-15. Control: ours from the cache give the printed means exactly.
+- beta* = 0.2: simple copy -15.02 dB (mu_a 1, N0 10, lambda0 0.7), gradual transfer -15.01, none -14.52, feedback
+  -14.63; the slow fKF -13.45; our bank of the two is best at q = 0 (= the slow fKF, -13.45) and gives -5.8 to -6.8 at
+  every q > 0; the bank of nine -11.92.
+- beta* = 2: simple copy -12.08 (mu_a 1, N0 2, lambda0 0.5), gradual -12.03, feedback -10.73, none -9.92; our bank of
+  the two -10.59 (q = 1e-2), the slow fKF -8.00, the bank of nine -9.46. Best settings at the grid edge (lambda0 = 0.5,
+  N0 = 2).
+- The combination gives nearly the same numbers with fKFs as with sKFs (-15.02 / -15.00, -12.08 / -12.23). Our bank of
+  two does not: with sKFs it led at beta* = 0.2 (-15.28).
+- Why the bank of the two fails at beta* = 0.2 (section 9, 4 realisations x 48 000 steps): on outliers, the Laplacian
+  density in the weights gives the fast fKF more than 60 nats in one step (eq. (60) of the draft: 38 nats on average for
+  this pair). With q > 0, mu_fast > 0.99 on 3-4 % of the steps, and the next mixing replaces the slow fKF by the fast
+  one: the slow fKF inside the bank sits at -7.0 dB instead of -20.0. Outliers are 22-45 % of those steps against 4 %
+  overall; the other flips are not explained. Under Gaussian noise: no flips, largest evidence 2.7 nats.
+- The review's schemes limit each sharing step by hand (1 - ell, or one copy per N0 steps, only when lambda_t >= lambda0).
+  The bank's 1 - ell_t follows the posterior and can reach 1 in one step.
+- Not checked: why the sKF pair did not fail this way.
+- Open: the bank of two with a closer v pair; the generalized Gaussian density in the weights (Section 4.5 of the
+  draft: the evidence of a large error vanishes for beta < 1); the Gaussian density under Gaussian noise; the softmax
+  combination against the bank of nine.
+- Run time: the 350 runs took 146 min; rerun from `results/` under 1 min.
