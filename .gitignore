@@ -219,3 +219,7 @@ __marimo__/
 
 # Local Branch Experimental library
 #filters_exp.py
+
+#Figures
+figures/
+mydask.html
