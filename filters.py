@@ -37,12 +37,21 @@ from numba_stats import norm as nb_norm
 
 from numpy.typing import NDArray
 
-GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
+# Classical Algorithms Parameters
 NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
+
+# Variable Step-size Algorithms Parameters
+JO_NLMS_parameters = namedtuple('JO_NLMS_parameters', ['label', 'm_0', 'var_w_0', 'var_eta'])
+
+# Robust Algorithms Parameters
+GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
 LMLS_parameters = namedtuple('LMLS_parameters', ['label', 'mu', 'a'])
 MCC_parameters  = namedtuple('MCC_parameters', ['label', 'mu', 'sigma'])
+
+# Sparse and Low-rank Algorithms Parameters
 RZA_LMS_parameters = namedtuple('RZA_LMS_parameters', ['label', 'mu', 'rho', 'epsilon'])
 
+# State-space Kalman Filter Algorithms Parameters
 sKF_parameters = namedtuple('sKF_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0'])
 AWU_sKF_parameters = namedtuple('AWU_sKF_parameters', ['label', 'var_eta', 'v_tilde_0'])
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
@@ -379,6 +388,42 @@ def GMVC_algorithm(N, x, d, h0, params):
             h += g*xtemp
     
     return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def JO_NLMS_algorithm(N, x, d, h0, parameters):
+  # Joint Optimization Normalized Least Mean Squares (JO-NLMS) Algorithm
+  h = np.copy(h0)
+  var_eta = float(parameters.var_eta)
+  var_w = float(parameters.var_w_0)
+  m = float(parameters.m_0)
+
+  L = len(h)
+  y = np.zeros((N,), dtype=np.float64)
+  e = np.zeros((N,), dtype=np.float64)
+  xtemp = np.zeros(L, dtype=np.float64)
+  h_hist = np.zeros((N, L), dtype=np.float64)
+  v_hist = np.zeros((N, L), dtype=np.float64)
+
+  for k in range(0,N):
+    h_hist[k] = h
+    v_hist[k] = p
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      # Internal parameters
+      norm = np.dot(xtemp, xtemp)
+      var_x = norm / L
+      p = m + L*var_w
+      q = p/(L*var_eta + (L+2)*p*var_x)
+      m = (1-q*var_x)*p
+      var_w = (q*e[k])**2*var_x
+      
+      # Update
+      h += (q*e[k])*xtemp
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
 def sKF_algorithm(N, x, d, h0, parameters):
