@@ -550,8 +550,8 @@ def AWU_sKF_clip_algorithm(N, x, d, h0, parameters):
       norm = xtemp @ xtemp
       # predict
       tau = v*norm/b_eta
-      v *= (1 - (1/L) * (1 if np.abs(e[k]) < tau else 0))
-      v += min(np.abs(e[k]), tau)**2
+      # v *= (1 - (1/L) * (1 if np.abs(e[k]) < tau else 0))
+      # v += min(np.abs(e[k]), tau)**2
       # update
       tau = v*norm/b_eta
       g = np.sign(e[k]) * min(np.abs(e[k]), tau) / (norm + 1e-15)
@@ -638,6 +638,7 @@ def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
   # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
   h = np.copy(h0)
   b_eta = np.copy(parameters.b_eta)
+  var_eta = 2*b_eta**2
   v_tilde_0 = np.copy(parameters.v_tilde_0)
 
   L = len(h)
@@ -660,11 +661,12 @@ def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
     if k >= L:
       # predict
       norm = np.dot(xtemp, xtemp)
-      var_eta = b_eta * np.abs(e[k])
+      var_eta_prime = b_eta * np.abs(e[k])
+      J_hat_prime = (var_eta_prime + v*norm)
       J_hat = (var_eta + v*norm)
-      v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat**2)))
+      v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat*J_hat_prime)))
       # update
-      s = var_eta + v * norm
+      s = var_eta_prime + v * norm
       h += xtemp * (v * e[k]/s)
       v *= (1.0 - (v * norm) / (float_L * s)) 
 
