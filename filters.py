@@ -43,6 +43,7 @@ NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
 # Variable Step-size Algorithms Parameters
 JO_NLMS_parameters = namedtuple('JO_NLMS_parameters', ['label', 'm_0', 'var_w_0', 'var_eta'])
 Shin_VSS_NLMS_parameters = namedtuple('Shin_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'phi', 'var_e_0'])
+NP_VSS_NLMS_parameters = namedtuple('NP_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'phi', 'var_e_0', 'zeta'])
 
 # Robust Algorithms Parameters
 GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
@@ -283,36 +284,6 @@ def NLMS_algorithm(N, x, d, h0, parameters):
   return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
 @njit(cache=True, nogil=True)
-def Shin_VSS_NLMS_algorithm(N, x, d, h0, parameters):
-  h = np.copy(h0)
-  var_eta = float(parameters.var_eta)
-  delta = float(parameters.delta)
-  phi = float(parameters.phi)
-  var_e = float(parameters.var_e_0)
-
-  L = len(h)
-  y = np.zeros((N,))
-  e = np.zeros((N,))
-  xtemp = np.zeros(L)
-  h_hist = np.zeros((N, L))
-  gamma = 1/delta
-
-  for k in range(0,N):
-    h_hist[k] = h
-    xtemp = shift(x[k], xtemp)
-    y[k] = np.dot(h, xtemp)
-    e[k] = d[k] - y[k]
-
-    if k >= L:
-      x_power = delta + np.dot(xtemp, xtemp)
-      var_e = phi*var_e + (1-phi)*e[k]**2/x_power
-      gamma = phi*gamma + (1-phi)/x_power
-      mu = max(0.0, (var_e - gamma*var_eta)/var_e)
-      h += mu*xtemp*e[k]/x_power
-
-  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
-
-@njit(cache=True, nogil=True)
 def RZA_LMS_algorithm(N, x, d, h0, parameters):
   # Reweighted Zero-Attracting LMS (RZA-LMS) Algorithm
   h = np.copy(h0)
@@ -456,6 +427,68 @@ def JO_NLMS_algorithm(N, x, d, h0, parameters):
       h += (q*e[k])*xtemp
 
   return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def Shin_VSS_NLMS_algorithm(N, x, d, h0, parameters):
+  h = np.copy(h0)
+  var_eta = float(parameters.var_eta)
+  delta = float(parameters.delta)
+  phi = float(parameters.phi)
+  var_e = float(parameters.var_e_0)
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+  gamma = 1/delta
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      x_power = delta + np.dot(xtemp, xtemp)
+      var_e = phi*var_e + (1-phi)*e[k]**2/x_power
+      gamma = phi*gamma + (1-phi)/x_power
+      mu = max(0.0, (var_e - gamma*var_eta)/var_e)
+      h += mu*xtemp*e[k]/x_power
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def NP_VSS_NLMS_algorithm(N, x, d, h0, parameters):
+  h = np.copy(h0)
+  var_eta = float(parameters.var_eta)
+  delta = float(parameters.delta)
+  phi = float(parameters.phi)
+  var_e = float(parameters.var_e_0)
+  zeta = float(parameters.zeta)
+  std_eta = np.sqrt(var_eta)
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      x_power = delta + np.dot(xtemp, xtemp)
+      var_e = phi*var_e + (1-phi)*e[k]**2
+      std_e = np.sqrt(var_e)
+      
+      mu = max(0.0, 1 - std_eta/(std_e + zeta))
+      h += mu*xtemp*e[k]/x_power
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
 @njit(cache=True, nogil=True)
 def sKF_algorithm(N, x, d, h0, parameters):
