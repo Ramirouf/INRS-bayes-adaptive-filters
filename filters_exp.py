@@ -1,6 +1,8 @@
 import numpy as np
 import dask
 import copy
+
+from collections.abc import Callable
 import filters
 from matplotlib import pyplot as plt
 from numba import njit
@@ -41,32 +43,93 @@ def generalized_gaussian(shape: tuple[int], beta:np.float64, scale:np.float64=1.
     flat[i] = mag if np.random.random() < 0.5 else -mag
   return out
 
+''' 
+#Current code for base to plot metrics
+
+colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+plt.figure(figsize=(10, 12))
+plt.subplot(3,1,1)
+k=0
+for params in Alg_Parameters:
+    label = params.label
+    plt.plot(10*np.log10(tvs_laplacian_MC_measures[label]['EMSE']), label=label, color=colors[k])
+    k += 1
+plt.ylabel("EMSE (dB)")
+plt.xlabel("Iterations")
+plt.title("Laplacian Noise - Time Varying System")
+plt.legend()
+
+plt.subplot(3,1,2)
+k=0
+for params in Alg_Parameters:
+    label = params.label
+    plt.semilogy(tvs_laplacian_MC_measures[label]['var'], label=label, color=colors[k])
+    k += 1
+plt.ylabel("v_tilde")
+plt.xlabel("Iterations")
+plt.title("Laplacian Noise - Time Varying System")
+
+plt.subplot(3,1,3)
+k=0
+for params in Alg_Parameters:
+    label = params.label
+    plt.plot(10*np.log10(tvs_laplacian_MC_measures[label]['MSD']), label=label, color=colors[k])
+    k += 1
+plt.ylabel("MSD (dB)")
+plt.xlabel("Iterations")
+plt.title("Laplacian Noise - Time Varying System")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+'''
+
+@njit(cache=True, nogil=True)
+def dB_scale(array: NDArray) -> NDArray:
+    return 10 * np.log10(array)
+
+@njit(cache=True, nogil=True)
+def linear_scale(array: NDArray) -> NDArray:
+    return array
+  
+def var_scale(array: NDArray) -> NDArray:
+    return 10 * np.log10(array[:, 0])
 
 def plot_metrics(
     metrics_dict: dict[str, dict[str, NDArray]],
     desired_metrics: list[str],
+    metrics_scales: dict[str, Callable[[NDArray], NDArray]] = {},
     subplot_shape: tuple[int, int] = (-1, 1),
-    title: str = ""
+    axis_size: tuple[int, int] = (5, 4),
+    title: str = "",
     ) -> plt.figure:
+
+    # Get the number of rows and columns for the subplots
     n_rows, n_cols = subplot_shape
     if n_rows == -1:
         n_rows = int(np.ceil(len(desired_metrics) / n_cols))
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+    # Create the figure object and subplots axes
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(axis_size[0]*n_cols, axis_size[1]*n_rows))
     if n_rows * n_cols == 1:
         axes = np.array([axes])
     axes = axes.ravel()
 
+    # Plot each desired metric for all algorithms
     for i, metric in enumerate(desired_metrics):
+        scale_func = metrics_scales.get(metric, linear_scale)
         ax = axes[i]
         for alg, alg_metrics in metrics_dict.items():
             if metric in alg_metrics:
-                ax.plot(alg_metrics[metric], label=alg)
-        ax.set_title(metric)
+                ax.plot(scale_func(alg_metrics[metric]), label=alg)
+            else:
+              raise ValueError(f"Metric '{metric}' not found for algorithm '{alg}'")
         ax.set_xlabel("Iteration")
         ax.set_ylabel(metric)
         ax.legend()
 
+    # Adjust layout and set the title if provided
     if title:
         fig.suptitle(title)
         plt.tight_layout(rect=[0, 0, 1, 0.96])
