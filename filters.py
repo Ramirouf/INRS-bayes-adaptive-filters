@@ -44,6 +44,7 @@ NLMS_parameters = namedtuple('NLMS_parameters', ['label', 'mu', 'delta'])
 JO_NLMS_parameters = namedtuple('JO_NLMS_parameters', ['label', 'm_0', 'var_w_0', 'var_eta'])
 Shin_VSS_NLMS_parameters = namedtuple('Shin_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'phi', 'var_e_0'])
 NP_VSS_NLMS_parameters = namedtuple('NP_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'phi', 'var_e_0', 'zeta'])
+ENP_VSS_NLMS_parameters = namedtuple('ENP_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'K', 'mu_tau', 'var_e_0', 'zeta'])
 
 # Robust Algorithms Parameters
 GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
@@ -481,6 +482,42 @@ def NP_VSS_NLMS_algorithm(N, x, d, h0, parameters):
     e[k] = d[k] - y[k]
 
     if k >= L:
+      x_power = delta + np.dot(xtemp, xtemp)
+      var_e = phi*var_e + (1-phi)*e[k]**2
+      std_e = np.sqrt(var_e)
+      
+      mu = max(0.0, 1 - std_eta/(std_e + zeta))
+      h += mu*xtemp*e[k]/x_power
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def ENP_VSS_NLMS_algorithm(N, x, d, h0, parameters):
+  h = np.copy(h0)
+  var_eta = float(parameters.var_eta)
+  delta = float(parameters.delta)
+  K = float(parameters.K)
+  mu_tau = float(parameters.mu_tau)
+  var_e = float(parameters.var_e_0)
+  zeta = float(parameters.zeta)
+  std_eta = np.sqrt(var_eta) + zeta
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+  mu = 1.0
+  phi = 1.0 - K/L
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      phi = 1.0 - K*max(mu, mu_tau)/L
       x_power = delta + np.dot(xtemp, xtemp)
       var_e = phi*var_e + (1-phi)*e[k]**2
       std_e = np.sqrt(var_e)
