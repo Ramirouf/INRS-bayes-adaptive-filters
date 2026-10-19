@@ -45,6 +45,7 @@ JO_NLMS_parameters = namedtuple('JO_NLMS_parameters', ['label', 'm_0', 'var_w_0'
 Shin_VSS_NLMS_parameters = namedtuple('Shin_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'phi', 'var_e_0'])
 NP_VSS_NLMS_parameters = namedtuple('NP_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'phi', 'var_e_0', 'zeta'])
 ENP_VSS_NLMS_parameters = namedtuple('ENP_VSS_NLMS_parameters', ['label', 'var_eta', 'delta', 'K', 'mu_tau', 'var_e_0', 'zeta'])
+RVSS_NLMS_parameters = namedtuple('RVSS_NLMS_parameters', ['label', 'epsilon', 'delta_0', 'phi'])
 
 # Robust Algorithms Parameters
 GMVC_parameters = namedtuple('GMVC_parameters', ['label', 'mu', 'tau', 'p'])
@@ -524,6 +525,35 @@ def ENP_VSS_NLMS_algorithm(N, x, d, h0, parameters):
       
       mu = max(0.0, 1 - std_eta/(std_e + zeta))
       h += mu*xtemp*e[k]/x_power
+
+  return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
+
+@njit(cache=True, nogil=True)
+def RVSS_NLMS_algorithm(N, x, d, h0, parameters):
+  # Robust Variable Step-Size NLMS algorithm
+  h = np.copy(h0)
+  epsilon = float(parameters.epsilon)
+  phi = float(parameters.phi)
+  delta = float(parameters.delta_0)
+
+  L = len(h)
+  y = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  h_hist = np.zeros((N, L))
+
+  for k in range(0,N):
+    h_hist[k] = h
+    xtemp = shift(x[k], xtemp)
+    y[k] = np.dot(h, xtemp)
+    e[k] = d[k] - y[k]
+
+    if k >= L:
+      x_norm = np.sqrt(epsilon + np.dot(xtemp, xtemp))
+      
+      g = min(np.abs(e[k])/x_norm, np.sqrt(delta))
+      h += xtemp*(g*np.sign(e[k])/x_norm)
+      delta = phi*delta + (1-phi)*min(e[k]**2/(x_norm**2), delta)
 
   return filter_output(y=y, e=e, h=h_hist, v=np.zeros((N,L), dtype=np.float64))
 
