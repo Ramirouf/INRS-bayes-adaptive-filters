@@ -61,8 +61,9 @@ AWU_sKF_parameters = namedtuple('AWU_sKF_parameters', ['label', 'var_eta', 'v_ti
 sKF_int_parameters = namedtuple('sKF_int_parameters', ['label', 'epsilon', 'var_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 
 sKF_L_parameters = namedtuple('sKF_L_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0'])
-AWU_sKF_L_parameters = namedtuple('AWU_sKF_L_parameters', ['label', 'b_eta', 'v_tilde_0'])
+AWU_sKF_L_parameters = namedtuple('AWU_sKF_L_parameters', ['label', 'b_eta', 'v_tilde_0', 'v_tilde_min'])
 sKF_L_int_parameters = namedtuple('sKF_L_int_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
+GISV_sKF_L_parameters = namedtuple('GISV_sKF_L_parameters', ['label', 'b_eta', 'v_tilde_0', 'epsilon_min'])
 
 filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 
@@ -737,9 +738,10 @@ def GISV_sKF_algorithm(N, x, d, h0, parameters):
 def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
   # Adaptive Weights Uncertainty Scalar Kalman Filter (AWU-sKF)
   h = np.copy(h0)
-  b_eta = np.copy(parameters.b_eta)
+  b_eta = float(parameters.b_eta)
+  v = float(parameters.v_tilde_0)
+  v_min = float(parameters.v_tilde_min)
   var_eta = 2*b_eta**2
-  v_tilde_0 = np.copy(parameters.v_tilde_0)
 
   L = len(h)
   float_L = np.float64(L)
@@ -747,7 +749,6 @@ def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
   y = np.zeros((N,))
   e = np.zeros((N,))
   xtemp = np.zeros(L)
-  v=v_tilde_0
   h_hist = np.zeros((N, L))
   v_hist = np.zeros((N, L))
   
@@ -765,6 +766,7 @@ def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
       J_hat_prime = (var_eta_prime + v*norm)
       J_hat = (var_eta + v*norm)
       v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat*J_hat_prime)))
+      v = max(v, v_min)
       # update
       s = var_eta_prime + v * norm
       h += xtemp * (v * e[k]/s)
@@ -875,6 +877,42 @@ def sKF_L_algorithm(N, x, d, h0, parameters):
             s = b_eta * abs(e[k]) + v * norm
             h = h + xtemp * (v * e[k]/s) # not h+= because it would mutate h0
             v = v * (1 - (v * norm) / (L * s)) 
+
+    return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+  
+@njit(cache=True, nogil=True)
+def GISV_sKF_L_algorithm(N, x, d, h0, parameters):
+  # Gradient Informed System Variance Scalar Kalman Filter for Laplacian Noise (GISV-sKF-L)
+    h = h0
+    b_eta = float(parameters.b_eta)
+    v = float(parameters.v_tilde_0)
+    epsilon_min = float(parameters.epsilon_min)
+
+    L = len(h)
+    y = np.zeros((N,))
+    e = np.zeros((N,))
+    xtemp = np.zeros(L)
+    h_hist = np.zeros((N, L))
+    v_hist = np.zeros((N, L))
+    epsilon = 0.0
+    
+    for k in range(0,N):
+        xtemp = shift(x[k], xtemp)
+        y[k] = np.dot(h, xtemp)
+        e[k] = d[k] - y[k]
+        h_hist[k] = h
+        v_hist[k] = v
+
+        if k >= L:
+            # predict
+            v += epsilon
+            # update
+            norm = np.dot(xtemp, xtemp)
+            s = b_eta * abs(e[k]) + v * norm
+            g = (v * e[k]/s) 
+            h = h + xtemp * g# not h+= because it would mutate h0
+            v = v * (1 - (v * norm) / (L * s))
+            epsilon = max(g**2*norm/L, epsilon_min)
 
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
