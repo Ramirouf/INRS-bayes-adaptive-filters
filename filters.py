@@ -763,9 +763,9 @@ def AWU_sKF_L_algorithm(N, x, d, h0, parameters):
       # predict
       norm = np.dot(xtemp, xtemp)
       var_eta_prime = b_eta * np.abs(e[k])
-      J_hat_prime = (var_eta_prime + v*norm)
+      # J_hat_prime = (var_eta_prime + v*norm)
       J_hat = (var_eta + v*norm)
-      v *= (1.0 + v*norm*(e[k]**2 - J_hat)/((J_hat*J_hat_prime)))
+      v *= (1.0 + v*norm*(np.sign(e[k]**2 - J_hat))/(J_hat))
       v = max(v, v_min)
       # update
       s = var_eta_prime + v * norm
