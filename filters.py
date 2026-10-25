@@ -24,6 +24,7 @@ import scipy
 import numba
 import dask
 import warnings
+import filters_exp as exp
 from dask.diagnostics import ProgressBar as dask_PB
 import math
 from numba import njit, prange, objmode, types, vectorize
@@ -65,11 +66,14 @@ AWU_sKF_L_parameters = namedtuple('AWU_sKF_L_parameters', ['label', 'b_eta', 'v_
 sKF_L_int_parameters = namedtuple('sKF_L_int_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 GISV_sKF_L_parameters = namedtuple('GISV_sKF_L_parameters', ['label', 'b_eta', 'v_tilde_0', 'epsilon_min'])
 
+# Output Structures
 filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 
+# Environment Parameters Structures
 std_env_parameters = namedtuple('std_env_parameters', ['ho', 'AR','var_v','var_x'])
 sys_inversion_gaussian_env_parameters = namedtuple('sys_inversion_gaussian_env_parameters', ['ho', 'AR', 'var_v', 'var_x'])
 laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
+sys_inversion_general_gaussian_env_parameters = namedtuple('sys_inversion_general_gaussian_env_parameters', ['ho', 'AR', 'beta', 'scale_v', 'var_x'])
 sys_inversion_laplacian_env_parameters = namedtuple('sys_inversion_laplacian_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
 
 # Tipos de array estáticos exigidos pelo objmode
@@ -1083,7 +1087,7 @@ def std_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = Tr
     return params.ho, {'x': x, 'v': v, 'd': d}
   
 @njit(cache=True, nogil=True)
-def sys_inversion_gaussian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
+def sys_inversion_gaussian_behavior(N: int, params: sys_inversion_gaussian_env_parameters, warm_up: bool = True):
     # AR process order and filter length
     L = len(params.ho)
 
@@ -1106,12 +1110,37 @@ def sys_inversion_gaussian_behavior(N: int, params: std_env_parameters, warm_up:
     return h_hist, {'x': x[L-1:N+L-1], 'v': v, 'd': d}
   
 @njit(cache=True, nogil=True)
-def sys_inversion_laplacian_behavior(N: int, params: std_env_parameters, warm_up: bool = True):
+def sys_inversion_laplacian_behavior(N: int, params: sys_inversion_laplacian_env_parameters, warm_up: bool = True):
     # AR process order and filter length
     L = len(params.ho)
 
     # Determine the noise signal
     v = np.random.laplace(loc=0.0, scale=params.scale_v, size=(N,))
+
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up, var_x = params.var_x)
+
+    # Determine the desired signal
+    d = np.zeros((N,), dtype=np.float64)
+    d[:N//2] = v[:N//2] + np.convolve(params.ho, x[:N//2+L], mode = 'full')[L-1:N//2+L-1]
+    d[N//2:] = v[N//2:] + np.convolve(-params.ho, x[N//2:], mode = 'full')[L-1:N//2+L-1]
+    
+    # ho through time
+    first_half = np.zeros((N//2, params.ho.shape[0]), dtype=params.ho.dtype) + params.ho[np.newaxis, :]
+    second_half = np.zeros(((N+1)//2, params.ho.shape[0]), dtype=params.ho.dtype) - params.ho[np.newaxis, :]
+    h_hist = np.vstack((first_half, second_half))
+
+    return h_hist, {'x': x[L-1:N+L-1], 'v': v, 'd': d}
+  
+@njit(cache=True, nogil=True)
+def sys_inversion_general_gaussian_behavior(N: int,
+                                            params: sys_inversion_general_gaussian_env_parameters,
+                                            warm_up: bool = True):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = exp.generalized_gaussian(shape=(N,), beta=params.beta, scale=params.scale_v)
 
     # Determine the input signal x through a AR process
     x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up, var_x = params.var_x)
