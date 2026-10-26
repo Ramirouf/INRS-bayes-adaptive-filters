@@ -75,6 +75,7 @@ sys_inversion_gaussian_env_parameters = namedtuple('sys_inversion_gaussian_env_p
 laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
 sys_inversion_general_gaussian_env_parameters = namedtuple('sys_inversion_general_gaussian_env_parameters', ['ho', 'AR', 'beta', 'scale_v', 'var_x'])
 sys_inversion_laplacian_env_parameters = namedtuple('sys_inversion_laplacian_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
+sys_inversion_impulsive_gaussian_env_parameters = namedtuple('sys_inversion_impulsive_gaussian_env_parameters', ['ho', 'AR', 'p', 'var_1', 'var_2', 'var_x'])
 
 # Tipos de array estáticos exigidos pelo objmode
 Complex1D = Array(complex128, 1, "C")
@@ -1150,6 +1151,30 @@ def sys_inversion_general_gaussian_behavior(N: int,
     d[:N//2] = v[:N//2] + np.convolve(params.ho, x[:N//2+L], mode = 'full')[L-1:N//2+L-1]
     d[N//2:] = v[N//2:] + np.convolve(-params.ho, x[N//2:], mode = 'full')[L-1:N//2+L-1]
     
+    # ho through time
+    first_half = np.zeros((N//2, params.ho.shape[0]), dtype=params.ho.dtype) + params.ho[np.newaxis, :]
+    second_half = np.zeros(((N+1)//2, params.ho.shape[0]), dtype=params.ho.dtype) - params.ho[np.newaxis, :]
+    h_hist = np.vstack((first_half, second_half))
+
+    return h_hist, {'x': x[L-1:N+L-1], 'v': v, 'd': d}
+  
+def sys_inversion_impulsive_gaussian_behavior(N: int,
+                                             params: sys_inversion_impulsive_gaussian_env_parameters,
+                                             warm_up: bool = True):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = exp.impulsive_gaussian(shape=(N,), p=params.p, var_1=params.var_1, var_2=params.var_2)
+
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up, var_x = params.var_x)
+
+    # Determine the desired signal
+    d = np.zeros((N,), dtype=np.float64)
+    d[:N//2] = v[:N//2] + np.convolve(params.ho, x[:N//2+L], mode = 'full')[L-1:N//2+L-1]
+    d[N//2:] = v[N//2:] + np.convolve(-params.ho, x[N//2:], mode = 'full')[L-1:N//2+L-1]
+
     # ho through time
     first_half = np.zeros((N//2, params.ho.shape[0]), dtype=params.ho.dtype) + params.ho[np.newaxis, :]
     second_half = np.zeros(((N+1)//2, params.ho.shape[0]), dtype=params.ho.dtype) - params.ho[np.newaxis, :]
