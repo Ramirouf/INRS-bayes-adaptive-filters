@@ -34,7 +34,6 @@ from matplotlib import pyplot as plt
 from numba.types import Array, complex128, float64
 from scipy.special import log_ndtr, logsumexp
 from collections import namedtuple
-from numba_stats import norm as nb_norm
 
 from numpy.typing import NDArray
 
