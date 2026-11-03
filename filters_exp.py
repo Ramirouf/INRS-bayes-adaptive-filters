@@ -75,3 +75,24 @@ def impulsive_gaussian(shape: tuple[int], p:np.float64, var_1:np.float64=1.0, va
     else:
       flat[i] = np.random.normal(0, np.sqrt(var_2))
   return out
+
+# Convergence metrics
+
+def db_area_of_convergence(db_metric: np.typing.NDArray[np.float64],
+                          floor_estimate_samples: int = 100) -> np.float64:
+  floor = np.mean(db_metric[-floor_estimate_samples:])
+  
+  area_of_convergence = np.sum(db_metric - floor)
+  return area_of_convergence
+
+def time_to_convergence(db_metric: np.typing.NDArray[np.float64],
+                         target: np.float64,
+                         cutoff: np.float64 = -3.0,
+                         dt: np.float64 = 1.0) -> int:
+  previous = db_metric[0]
+  for idx, measure in enumerate(db_metric):
+    if measure < (target - cutoff) and previous > (target - cutoff):
+      return idx*dt
+    previous = measure
+
+  raise Exception("Couldn't find a convergence time/iteration")
