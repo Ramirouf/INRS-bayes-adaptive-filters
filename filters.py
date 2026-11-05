@@ -69,6 +69,9 @@ GISV_sKF_L_parameters = namedtuple('GISV_sKF_L_parameters', ['label', 'b_eta', '
 cvx_comb_sKF_parameters = namedtuple('cvx_comb_sKF_parameters', [
   'label', 'epsilon_1', 'epsilon_2', 'var_eta', 'v_tilde_0', 'mu_a', 'a_plus', 'tau', 'l', 'reg_rho', 'lambda_0'
   ])
+cvx_comb_sKF_L_parameters = namedtuple('cvx_comb_sKF_L_parameters', [
+  'label', 'epsilon_1', 'epsilon_2', 'b_eta', 'v_tilde_0', 'mu_a', 'a_plus', 'tau', 'l', 'reg_rho', 'lambda_0'
+  ])
 
 # Output Structures
 filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
@@ -1066,6 +1069,77 @@ def cvx_comb_sKF(N, x, d, h0, parameters):
       norm = np.dot(xtemp, xtemp)
       s_1 = var_eta + v_1 * norm
       s_2 = var_eta + v_2 * norm
+      g_1 = (v_1 * e_1[k] / s_1) 
+      g_2 = (v_2 * e_2[k] / s_2) 
+      h_1 += xtemp * g_1
+      h_2 += xtemp * g_2
+      v_1 *= (1 - (v_1 * norm) / (L * s_1))
+      v_2 *= (1 - (v_2 * norm) / (L * s_2))
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def cvx_comb_sKF_L(N, x, d, h0, parameters):
+  # sKF parameters
+  epsilon_1 = parameters.epsilon_1
+  epsilon_2 = parameters.epsilon_2
+  b_eta = parameters.b_eta
+  v_tilde_0 = parameters.v_tilde_0
+  # convex combination parameters
+  mu_a = parameters.mu_a
+  a_plus = np.abs(parameters.a_plus)
+  tau = parameters.tau
+  l = parameters.l
+  reg_rho = parameters.reg_rho
+  lambda_0 = parameters.lambda_0
+  
+  # Initialization
+  L = len(h0)
+  h_1 = np.copy(h0)
+  h_2 = np.copy(h0)
+  h = np.copy(h0)
+  y_1 = np.zeros((N,))
+  y_2 = np.zeros((N,))
+  y = np.zeros((N,))
+  e_1 = np.zeros((N,))
+  e_2 = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  v_1 = np.copy(v_tilde_0)
+  v_2 = np.copy(v_tilde_0)
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  a = 0.0
+  rho_t = 0.0
+  
+  for k in range(0,N):
+    lambda_t = sgm_cvx_lambda(a, a_plus)
+    xtemp = shift(x[k], xtemp)
+    y_1[k] = np.dot(h_1, xtemp)
+    y_2[k] = np.dot(h_2, xtemp)
+    e_1[k] = d[k] - y_1[k]
+    e_2[k] = d[k] - y_2[k]
+    y[k] = lambda_t*y_1[k] + (1.0-lambda_t)*y_2[k]
+    e[k] = lambda_t*e_1[k] + (1.0-lambda_t)*e_2[k]
+    h = lambda_t*h_1 + (1.0-lambda_t)*h_2
+    v = lambda_t*v_1 + (1.0-lambda_t)*v_2
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # cvx_combination
+      rho_t = tau*rho_t + (1.0-tau)*(y_1[k] - y_2[k])**2
+      a += (mu_a/(rho_t + reg_rho))*lambda_t*(1.0-lambda_t)*e[k]*(y_1[k] - y_2[k])
+      a = interval_constrain(a, -a_plus, a_plus)
+      if lambda_t > lambda_0:
+        h_2 = l*h_2 + (1.0-l)*h_1
+      # sKF predict step
+      v_1 += epsilon_1
+      v_2 += epsilon_2
+      # update
+      norm = np.dot(xtemp, xtemp)
+      s_1 = b_eta*np.abs(e_1[k]) + v_1 * norm
+      s_2 = b_eta*np.abs(e_2[k]) + v_2 * norm
       g_1 = (v_1 * e_1[k] / s_1) 
       g_2 = (v_2 * e_2[k] / s_2) 
       h_1 += xtemp * g_1
