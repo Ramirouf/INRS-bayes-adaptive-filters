@@ -86,9 +86,10 @@ def db_area_of_convergence(db_metric: np.typing.NDArray[np.float64],
   return area_of_convergence
 
 def time_to_convergence(db_metric: np.typing.NDArray[np.float64],
-                         target: np.float64,
-                         cutoff: np.float64 = -3.0,
-                         dt: np.float64 = 1.0) -> int:
+                        floor_estimate_samples: int = 100,
+                        cutoff: np.float64 = -3.0,
+                        dt: np.float64 = 1.0) -> int:
+  target = np.mean(db_metric[-floor_estimate_samples:])
   previous = db_metric[0]
   for idx, measure in enumerate(db_metric):
     if measure < (target - cutoff) and previous > (target - cutoff):
@@ -96,3 +97,17 @@ def time_to_convergence(db_metric: np.typing.NDArray[np.float64],
     previous = measure
 
   raise Exception("Couldn't find a convergence time/iteration")
+
+# Perform a grid search on algorithms for a given target MSD, optimizing for convergence speed
+# Only work for algorithms whose steady-state performance is determined by a single parameter (e.g. mu_min)
+def grid_search(N,
+                NR,
+                h0,
+                environment,
+                environment_parameters,
+                algorithm,
+                algorithm_parameters,
+                convergence_metric, 
+                metric_parameters=None,
+                dask_client=None):
+  ...

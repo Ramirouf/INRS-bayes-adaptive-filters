@@ -65,6 +65,11 @@ AWU_sKF_L_parameters = namedtuple('AWU_sKF_L_parameters', ['label', 'b_eta', 'v_
 sKF_L_int_parameters = namedtuple('sKF_L_int_parameters', ['label', 'epsilon', 'b_eta', 'v_tilde_0', 'dx_factor', 'min_std_deviations'])
 GISV_sKF_L_parameters = namedtuple('GISV_sKF_L_parameters', ['label', 'b_eta', 'v_tilde_0', 'epsilon_min'])
 
+# Combination of filters Parameters
+cvx_comb_sKF_parameters = namedtuple('cvx_comb_sKF_parameters', [
+  'label', 'epsilon_1', 'epsilon_2', 'var_eta', 'v_tilde_0', 'mu_a', 'a_plus', 'tau', 'l', 'reg_rho', 'lambda_0'
+  ])
+
 # Output Structures
 filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 
@@ -920,54 +925,6 @@ def GISV_sKF_L_algorithm(N, x, d, h0, parameters):
 
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
-"""Exact scalar-variance filter for a Gaussian prior with a Laplacian likelihood.
-
-Implements the sKF-L (exact) filter of Section 5 of the draft, paragraph
-"Scalar-variance filter (sKF-L, exact)". This is the closed form of the exact
-marginal, so it is the counterpart of `sKF_L_algorithm` in the notebook, which
-implements the *minorized* filter of Section 4 (eqs. 50 and 51).
-
-Where the minorization replaces the Laplacian log-density by a quadratic and
-lands back on a Kalman-like gain, the exact marginal stays a two-component
-mixture, one component per branch of |e_t - x_m d|. Its first two moments close
-in terms of four scalars that are the same for every coefficient m:
-
-    Lambda_t, Gamma_t, P_t, Q_t
-
-so the per-step cost is four evaluations of the normal CDF, independent of L.
-
-Per step, with e_t = d_t - x_t' h_{t-1}, sigma = +/-1 and ||x_t|| the window norm:
-
-    v~_t      = v_{t-1} + epsilon
-    kappa_s   = (s*e_t - v~_t*||x_t||^2/b_eta) / (sqrt(v~_t)*||x_t||)
-    pi_s      = softmax(-s*e_t/b_eta + log Phi(kappa_s))
-    mills(k)  = phi(k)/Phi(k)                        (inverse Mills ratio)
-
-    Lambda = pi_+ - pi_-                 Gamma = pi_+ mills_+ - pi_- mills_-
-    P      = pi_+ mills_+ + pi_- mills_- Q     = pi_+ k_+ mills_+ + pi_- k_- mills_-
-
-    h_t = h_{t-1} + (v~_t/b_eta * Lambda - sqrt(v~_t)/||x_t|| * Gamma) * x_t
-    D_t = g^2 (1 - Lambda^2) - 2*g*l*(P - Lambda*Gamma) - l^2*(Q + Gamma^2)
-          with g = v~_t/b_eta and l = sqrt(v~_t)/||x_t||
-    v_t = v~_t + D_t*||x_t||^2 / L
-
-Lambda_t lies in [-1, 1] and acts as a saturating prediction error: a single
-observation can move each coefficient by at most v~_t*|x_t,m|/b_eta. That
-bounded influence is the point of the Laplacian likelihood.
-
-Signature and return value follow the convention of the other filters in
-`bayes-adaptive-filters.ipynb`, so this drops into the same `Algorithms` list
-and the same `sKF_L_params` struct as `sKF_L_algorithm`:
-
-    (N, x, d, h0, parameters) -> {'h': h_hist,   (N, L) weights, before each update
-                                  'y': y,        (N,)   predicted output
-                                  'e': e,        (N,)   prediction error
-                                  'v': v_hist}   (N, L) scalar variance, repeated
-
-Depends only on numpy and scipy.
-"""
-
-
 # Leading underscores so that `from skf_l_exact import *` cannot shadow the
 # notebook's own shift(), which is @njit and is called from compiled filters.
 _SIGN = np.array([1.0, -1.0])  # the two mixture branches, sigma = +1 and sigma = -1
@@ -979,16 +936,6 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
     epsilon = parameters.epsilon
     b_eta = parameters.b_eta
     v_tilde_0 = parameters.v_tilde_0
-
-    # No regularization of x here, matching sKF_algorithm and sKF_L_algorithm.
-    # sKF_L_integral_algorithm does regularize internally, with
-    # x_reg = np.sign(x)*(np.abs(x) + 1e-3), so the two routes see slightly
-    # different inputs. Measured, that is worth about 0.2% of the weights
-    # (max 2.9e-3 at epsilon=0.01, b_eta=50*sqrt(var_v)), well under the
-    # integral-vs-closed gap at dx_factor=1/100, which is why it does not change
-    # the comparison today. It is a floor, though, not a discretization error: it
-    # does not shrink as the grid is refined. If the grid is ever taken far enough
-    # that the gap drops below ~3e-3, pass x_reg here as well.
 
     L = len(h)
     y = np.zeros((N,))
@@ -1017,16 +964,6 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             kappa = (_SIGN * e[k] - v_tilde * norm / b_eta) / (
                 np.sqrt(v_tilde) * norm_x
             )
-
-            # --- log domain, and it has to stay that way ---------------------------
-            # Phi(kappa) underflows to 0 for kappa below about -38, and the two
-            # unnormalized weights differ by a factor exp(2*e[k]/b_eta), which
-            # overflows for a residual of a few b_eta. With Laplacian noise both
-            # happen on the same steps: the outliers. Computing exp(-s*e/b_eta) and
-            # Phi(kappa) separately and multiplying loses every digit exactly where
-            # this filter is supposed to earn its keep. log_ndtr is accurate deep
-            # into the left tail, and logsumexp normalizes without ever forming the
-            # individual factors. Same reason the Mills ratio goes through logs.
             
             log_Phi = nb_log_ndtr(kappa)
             log_pi = -_SIGN * e[k] / b_eta + log_Phi
@@ -1054,6 +991,89 @@ def sKF_L_exact_algorithm(N, x, d, h0, parameters):
             v = v_tilde + D * norm / L
 
     return filter_output(y=y, e=e, h=h_hist, v=v_hist)
+
+@njit(cache=True, nogil=True)
+def sgm(x:np.float64):
+  return 1 / (1 + np.exp(-x))
+
+@njit(cache=True, nogil=True)
+def sgm_cvx_lambda(a: np.float64, a_plus: np.float64):
+  return (sgm(a) - sgm(-a_plus))/(sgm(a_plus) - sgm(-a_plus))
+
+@njit(cache=True, nogil=True)
+def interval_constrain(x, x_min, x_max):
+  return max(min(x, x_max), x_min)
+
+@njit(cache=True, nogil=True)
+def cvx_comb_sKF(N, x, d, h0, parameters):
+  # sKF parameters
+  epsilon_1 = parameters.epsilon_1
+  epsilon_2 = parameters.epsilon_2
+  var_eta = parameters.var_eta
+  v_tilde_0 = parameters.v_tilde_0
+  # convex combination parameters
+  mu_a = parameters.mu_a
+  a_plus = np.abs(parameters.a_plus)
+  tau = parameters.tau
+  l = parameters.l
+  reg_rho = parameters.reg_rho
+  lambda_0 = parameters.lambda_0
+  
+  # Initialization
+  L = len(h0)
+  h_1 = np.copy(h0)
+  h_2 = np.copy(h0)
+  h = np.copy(h0)
+  y_1 = np.zeros((N,))
+  y_2 = np.zeros((N,))
+  y = np.zeros((N,))
+  e_1 = np.zeros((N,))
+  e_2 = np.zeros((N,))
+  e = np.zeros((N,))
+  xtemp = np.zeros(L)
+  v_1 = np.copy(v_tilde_0)
+  v_2 = np.copy(v_tilde_0)
+  h_hist = np.zeros((N, L))
+  v_hist = np.zeros((N, L))
+  a = 0.0
+  rho_t = 0.0
+  
+  for k in range(0,N):
+    lambda_t = sgm_cvx_lambda(a, a_plus)
+    xtemp = shift(x[k], xtemp)
+    y_1[k] = np.dot(h_1, xtemp)
+    y_2[k] = np.dot(h_2, xtemp)
+    e_1[k] = d[k] - y_1[k]
+    e_2[k] = d[k] - y_2[k]
+    y[k] = lambda_t*y_1[k] + (1.0-lambda_t)*y_2[k]
+    e[k] = lambda_t*e_1[k] + (1.0-lambda_t)*e_2[k]
+    h = lambda_t*h_1 + (1.0-lambda_t)*h_2
+    v = lambda_t*v_1 + (1.0-lambda_t)*v_2
+    h_hist[k] = h
+    v_hist[k] = v
+
+    if k >= L:
+      # cvx_combination
+      rho_t = tau*rho_t + (1.0-tau)*(y_1[k] - y_2[k])**2
+      a += (mu_a/(rho_t + reg_rho))*lambda_t*(1.0-lambda_t)*e[k]*(y_1[k] - y_2[k])
+      a = interval_constrain(a, -a_plus, a_plus)
+      if lambda_t > lambda_0:
+        h_2 = l*h_2 + (1.0-l)*h_1
+      # sKF predict step
+      v_1 += epsilon_1
+      v_2 += epsilon_2
+      # update
+      norm = np.dot(xtemp, xtemp)
+      s_1 = var_eta + v_1 * norm
+      s_2 = var_eta + v_2 * norm
+      g_1 = (v_1 * e_1[k] / s_1) 
+      g_2 = (v_2 * e_2[k] / s_2) 
+      h_1 += xtemp * g_1
+      h_2 += xtemp * g_2
+      v_1 *= (1 - (v_1 * norm) / (L * s_1))
+      v_2 *= (1 - (v_2 * norm) / (L * s_2))
+
+  return filter_output(y=y, e=e, h=h_hist, v=v_hist)
 
 @njit(cache=True, nogil=True)
 def _generate_normal_input_signal(N:int, AR: NDArray[np.float64], warm_up: bool = True, var_x: np.float64 = 1.0):
