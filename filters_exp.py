@@ -82,16 +82,48 @@ def impulsive_gaussian(shape: tuple[int], p:np.float64, var_1:np.float64=1.0, va
 # Convergence metrics
 
 def db_area_of_convergence(db_metric: np.typing.NDArray[np.float64]) -> np.float64:
+  '''
+  Compute the area of convergence of the given dB metric.
+
+  Parameters
+  ----------
+  db_metric : NDArray[np.float64]
+    Array of metric values in dB.
+
+  Returns
+  -------
+  np.float64
+    Area of convergence.
+  '''
+  
   floor = np.min(db_metric)
   
   area_of_convergence = np.sum(db_metric - floor)
   return area_of_convergence
 
 def time_to_convergence(db_metric: np.typing.NDArray[np.float64],
-                        floor_estimate_samples: int = 100,
                         cutoff: np.float64 = -3.0,
                         dt: np.float64 = 1.0) -> int:
-  target = np.mean(db_metric[-floor_estimate_samples:])
+  ''' 
+  Compute the time to convergence of the given dB metric.
+
+  Parameters
+  ----------
+  db_metric : NDArray[np.float64]
+    Array of metric values in dB.
+  floor_estimate_samples : int
+    Number of samples from the end of the array to estimate the floor.
+  cutoff : float
+    Threshold below the floor to consider as convergence.
+  dt : float
+    Time step between samples.
+
+  Returns
+  -------
+  int
+    Time to convergence in units of dt.
+  '''
+  target = np.min(db_metric)
   previous = db_metric[0]
   for idx, measure in enumerate(db_metric):
     if measure < (target - cutoff) and previous > (target - cutoff):
@@ -99,6 +131,27 @@ def time_to_convergence(db_metric: np.typing.NDArray[np.float64],
     previous = measure
 
   raise Exception("Couldn't find a convergence time/iteration")
+
+def mean_absolute_steady_state_derivative(db_metric: np.typing.NDArray[np.float64],
+                                          floor_estimate_samples: int = 100) -> np.float64:
+  '''
+  Compute the mean absolute derivative of the steady-state portion of the metric.
+
+  Parameters
+  ----------
+  db_metric : NDArray[np.float64]
+    Array of metric values.
+  floor_estimate_samples : int
+    Number of samples from the end of the array to consider as steady-state.
+
+  Returns
+  -------
+  np.float64
+    Mean absolute derivative of the steady-state portion.
+  '''
+  steady_state = db_metric[-floor_estimate_samples:]
+  derivative = np.diff(steady_state)
+  return np.mean(np.abs(derivative))
 
 # Perform a grid search on algorithms for a given target MSD, optimizing for convergence speed
 def default_db_scale(array: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -321,6 +374,7 @@ def grid_search(
 
   convergence_grid = np.full(grid_shape, np.nan, dtype=np.float64)
   steady_state_grid = np.full(grid_shape, np.nan, dtype=np.float64)
+  steady_state_derivative_grid = np.full(grid_shape, np.nan, dtype=np.float64)
 
   for combo_idx in range(len(all_combos)):
     multi_idx = np.unravel_index(combo_idx, grid_shape)
@@ -334,6 +388,13 @@ def grid_search(
     except Exception:
       ss_val = np.nan
     steady_state_grid[multi_idx] = ss_val
+
+    # Steady-state derivative calculation
+    try:
+      ss_deriv = float(mean_absolute_steady_state_derivative(scaled_curve, floor_estimate_samples=floor_estimate_samples))
+    except Exception:
+      ss_deriv = np.nan
+    steady_state_derivative_grid[multi_idx] = ss_deriv
 
     # Convergence metric evaluation with divergence/NaN penalty
     try:
@@ -370,11 +431,72 @@ def grid_search(
       'optimal_index': opt_multi_idx,
       'convergence_grid': convergence_grid,
       'steady_state_grid': steady_state_grid,
+      'steady_state_derivative_grid': steady_state_derivative_grid,
       'grid_axes': conv_dict,
       'measures': res,
       'best_label': best_label,
       'labels_grid': labels_grid,
   }
+
+
+def plot_grid_search_histograms(
+    grid_results: dict[str, Any],
+    bins: int = 15,
+    figsize: tuple[float, float] = (12, 4.5),
+) -> plt.Figure:
+  """Plot histograms of the convergence metric and steady-state performance metric.
+
+  Parameters
+  ----------
+  grid_results : dict
+    Output dictionary returned by grid_search.
+  bins : int, optional
+    Number of histogram bins (default is 15).
+  figsize : tuple, optional
+    Figure dimensions (width, height).
+
+  Returns
+  -------
+  plt.Figure
+    The created matplotlib figure.
+  """
+  conv_data = grid_results['convergence_grid'].ravel()
+  ss_data = grid_results['steady_state_grid'].ravel()
+
+  valid_conv = conv_data[np.isfinite(conv_data)]
+  valid_ss = ss_data[np.isfinite(ss_data)]
+
+  fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+  # 1. Convergence metric histogram
+  ax0 = axes[0]
+  ax0.hist(valid_conv, bins=bins, color='steelblue', edgecolor='black', alpha=0.7)
+  best_conv = grid_results['best_metric_value']
+  ax0.axvline(best_conv, color='crimson', linestyle='--', linewidth=2, label=f'Optimal ({best_conv:.2f})')
+  ax0.axvline(np.mean(valid_conv), color='orange', linestyle=':', linewidth=1.5, label=f'Mean ({np.mean(valid_conv):.2f})')
+  ax0.set_xlabel('Convergence Metric (dB \u00d7 samples)', fontweight='bold')
+  ax0.set_ylabel('Frequency (Count)', fontweight='bold')
+  ax0.set_title('Convergence Metric Histogram', fontsize=11)
+  ax0.grid(True, alpha=0.3)
+  ax0.legend(fontsize=9)
+
+  # 2. Steady-state performance metric histogram
+  ax1 = axes[1]
+  ax1.hist(valid_ss, bins=bins, color='seagreen', edgecolor='black', alpha=0.7)
+  best_ss = grid_results['best_steady_state']
+  mean_ss = np.mean(valid_ss)
+  std_ss = np.std(valid_ss)
+  ax1.axvline(best_ss, color='crimson', linestyle='--', linewidth=2, label=f'Optimal ({best_ss:.2f} dB)')
+  ax1.axvline(mean_ss, color='orange', linestyle=':', linewidth=1.5, label=f'Mean ({mean_ss:.2f} dB \u00b1 {std_ss:.2f})')
+  ax1.set_xlabel('Steady-State Metric [dB]', fontweight='bold')
+  ax1.set_ylabel('Frequency (Count)', fontweight='bold')
+  ax1.set_title('Steady-State Performance Metric Histogram', fontsize=11)
+  ax1.grid(True, alpha=0.3)
+  ax1.legend(fontsize=9)
+
+  fig.suptitle('Hyperparameter Grid Search Metric Distributions', fontsize=12, y=1.02)
+  plt.tight_layout()
+  return fig
 
 
 def plot_grid_search_pairwise_heatmaps(
@@ -409,9 +531,18 @@ def plot_grid_search_pairwise_heatmaps(
   param_names = list(grid_axes.keys())
   K = len(param_names)
   opt_idx = grid_results['optimal_index']
-  grid_data = grid_results['convergence_grid'] if metric_type == 'convergence' else grid_results['steady_state_grid']
-  best_metric_val = grid_results['best_metric_value'] if metric_type == 'convergence' else grid_results['best_steady_state']
-  metric_label = "Convergence (dB Area)" if metric_type == 'convergence' else "Steady-State (dB)"
+  if metric_type == 'convergence':
+    grid_data = grid_results['convergence_grid']
+    best_metric_val = grid_results['best_metric_value']
+    metric_label = "Convergence (dB Area)"
+  elif metric_type == 'steady_state_derivative':
+    grid_data = grid_results.get('steady_state_derivative_grid', grid_results['steady_state_grid'])
+    best_metric_val = float(grid_data[opt_idx])
+    metric_label = "Steady-State Derivative (dB/sample)"
+  else:
+    grid_data = grid_results['steady_state_grid']
+    best_metric_val = grid_results['best_steady_state']
+    metric_label = "Steady-State (dB)"
 
   if K == 1:
     fig, ax = plt.subplots(figsize=figsize or (6, 4))
@@ -527,8 +658,12 @@ def interactive_grid_search_heatmap(
     return plot_grid_search_pairwise_heatmaps(grid_results, metric_type=default_metric, cmap=cmap)
 
   # Dropdowns for axes and metric
+  metric_options = [('Convergence Metric', 'convergence'), ('Steady-State Metric', 'steady_state')]
+  if 'steady_state_derivative_grid' in grid_results:
+    metric_options.append(('Steady-State Derivative', 'steady_state_derivative'))
+
   metric_dropdown = widgets.Dropdown(
-      options=[('Convergence Metric', 'convergence'), ('Steady-State Metric', 'steady_state')],
+      options=metric_options,
       value=default_metric,
       description='Metric:',
       layout=widgets.Layout(width='260px')
@@ -577,7 +712,15 @@ def interactive_grid_search_heatmap(
 
       i = param_names.index(y_name)
       j = param_names.index(x_name)
-      grid_data = grid_results['convergence_grid'] if m_type == 'convergence' else grid_results['steady_state_grid']
+      if m_type == 'convergence':
+        grid_data = grid_results['convergence_grid']
+        metric_str = "Convergence Area"
+      elif m_type == 'steady_state_derivative':
+        grid_data = grid_results.get('steady_state_derivative_grid', grid_results['steady_state_grid'])
+        metric_str = "SS Derivative"
+      else:
+        grid_data = grid_results['steady_state_grid']
+        metric_str = "Steady-State MSD"
 
       slicing = [param_sliders[p].value for p in param_names]
       slicing[i] = slice(None)
@@ -611,7 +754,6 @@ def interactive_grid_search_heatmap(
       opt_info = ", ".join([f"{k}*={_format_param_val(v)}" for k, v in best_params.items()])
       opt_status = "[Slice @ Global Optimum]" if at_opt else "[Off-optimum Slice]"
 
-      metric_str = "Convergence Area" if m_type == 'convergence' else "Steady-State MSD"
       ax.set_title(
           f"{y_name} vs {x_name} {opt_status}\n"
           f"Global Optimum: ({opt_info}) | Best {metric_str}: {best_val:.2f}\n"
