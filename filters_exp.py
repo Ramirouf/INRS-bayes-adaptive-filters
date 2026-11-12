@@ -16,6 +16,8 @@ from pathlib import Path
 import os
 import yaml
 import metrics
+import gc
+import time
 
 from numpy.typing import NDArray
 
@@ -1185,6 +1187,7 @@ def plot_grid_search_learning_curves(
 def run_grid_search_experiment(
     folder_path: str | Path,
     save_figures: bool = True,
+    save_summary_yaml: bool = True,
 ) -> dict[str, Any]:
   """Run a complete grid search experiment loaded from standardized YAML configs and save figures as PDFs.
 
@@ -1194,6 +1197,8 @@ def run_grid_search_experiment(
     Path to the experiment folder containing 'environment_config.yml' and 'algorithm_config.yml'.
   save_figures : bool, optional
     Whether to generate and save PDF figures in '<folder_path>/figures/'.
+  save_summary_yaml : bool, optional
+    Whether to save 'optimal_parameters.yml' and 'grid_search_summary.yml'.
 
   Returns
   -------
@@ -1202,6 +1207,7 @@ def run_grid_search_experiment(
   """
   cfg = load_experiment_configs(folder_path)
 
+  t_start = time.time()
   grid_results = grid_search(
       N=cfg['N'],
       NR=cfg['NR'],
@@ -1219,11 +1225,57 @@ def run_grid_search_experiment(
       seed=cfg['seed'],
       minimize_convergence_metric=cfg['minimize_convergence_metric'],
   )
-  # Store performance parameters in grid_results for downstream use
+  t_elapsed = time.time() - t_start
+
+  # Store performance parameters and elapsed time in grid_results
   grid_results['algorithm_performance_parameters'] = cfg['algorithm_performance_parameters']
+  grid_results['computation_time_seconds'] = t_elapsed
+
+  folder = Path(folder_path)
+
+  if save_summary_yaml:
+    # 1. Save optimal_parameters.yml (performance params first, optimal convergence params last)
+    opt_dict = {}
+    for k, v in cfg['algorithm_performance_parameters'].items():
+      opt_dict[k] = float(v)
+    for k, v in grid_results['best_parameters'].items():
+      opt_dict[k] = float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v
+
+    opt_file = folder / "optimal_parameters.yml"
+    with open(opt_file, 'w') as f:
+      yaml.dump(opt_dict, f, sort_keys=False, default_flow_style=False)
+
+    # 2. Save grid_search_summary.yml (all numeric metrics of the grid search)
+    c_grid = grid_results['convergence_grid']
+    ss_grid = grid_results['steady_state_grid']
+    deriv_grid = grid_results.get('steady_state_derivative_grid', np.array([]))
+
+    valid_conv = c_grid[np.isfinite(c_grid)]
+    valid_ss = ss_grid[np.isfinite(ss_grid)]
+    valid_deriv = deriv_grid[np.isfinite(deriv_grid)] if deriv_grid.size > 0 else np.array([])
+    total_combos = int(np.prod(c_grid.shape))
+
+    summary_dict = {
+        'computation_time_seconds': float(round(t_elapsed, 2)),
+        'total_combinations': total_combos,
+        'optimal_convergence_metric': float(grid_results['best_metric_value']),
+        'mean_convergence_metric': float(np.mean(valid_conv)) if len(valid_conv) > 0 else None,
+        'std_convergence_metric': float(np.std(valid_conv)) if len(valid_conv) > 0 else None,
+        'optimal_steady_state_db': float(grid_results['best_steady_state']),
+        'mean_steady_state_db': float(np.mean(valid_ss)) if len(valid_ss) > 0 else None,
+        'std_steady_state_db': float(np.std(valid_ss)) if len(valid_ss) > 0 else None,
+    }
+    if len(valid_deriv) > 0:
+      summary_dict['max_steady_state_derivative'] = float(np.max(valid_deriv))
+      summary_dict['mean_steady_state_derivative'] = float(np.mean(valid_deriv))
+      summary_dict['std_steady_state_derivative'] = float(np.std(valid_deriv))
+
+    summary_file = folder / "grid_search_summary.yml"
+    with open(summary_file, 'w') as f:
+      yaml.dump(summary_dict, f, sort_keys=False, default_flow_style=False)
 
   if save_figures:
-    fig_dir = Path(folder_path) / "figures"
+    fig_dir = folder / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Metric histograms
@@ -1268,6 +1320,10 @@ def run_grid_search_experiment(
     lc_path = fig_dir / "learning_curves_comparison.pdf"
     fig_lc.savefig(lc_path, format='pdf', bbox_inches='tight')
     plt.close(fig_lc)
+
+  # Explicit memory cleanup
+  plt.close('all')
+  gc.collect()
 
   return grid_results
 
