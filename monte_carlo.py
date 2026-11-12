@@ -3,6 +3,7 @@ Monte Carlo simulations for adaptive filters using Dask for parallel execution.
 """
 
 import numba
+from numba import njit
 import numpy as np
 import dask
 import copy
@@ -11,6 +12,10 @@ from numba_progress import ProgressBar
 from dask.diagnostics import ProgressBar as dask_PB
 
 from numpy.typing import NDArray
+
+@njit(cache=True)
+def _seed_numba(seed: int) -> None:
+    np.random.seed(seed)
 
 def _PBbar_update(PBar: ProgressBar | str | None, k: int, NR: int) -> None:
     """
@@ -129,7 +134,8 @@ def MC_Simulations(
         Dictionary containing the averaged measures for each algorithm over the Monte Carlo realizations.
     """
     L = len(h0)
-    np.random.seed(seed)
+    if seed is not None:
+        _seed_numba(int(seed))
     N_Algorithms = len(algorithms)
     
     measures = {algorithms_parameters[k].label: _measure_init(L, N, desired_metrics=desired_metrics) for k in range(N_Algorithms)}
@@ -182,7 +188,7 @@ def _create_task_list(
     """
     tasks = [
         _delayed_chunked_iterations(
-            NR = NR//num_chunks, seed = seed_sequence[k].generate_state(1), **general_parameters
+            NR = NR//num_chunks, seed = int(seed_sequence[k].generate_state(1)[0]), **general_parameters
         ) for k in range(num_chunks)
     ]
     
@@ -190,9 +196,9 @@ def _create_task_list(
     if rest_of_realizations > 0:
         tasks.append(
             _delayed_chunked_iterations(
-                    NR = rest_of_realizations, seed = seed_sequence[-1].generate_state(1), **general_parameters
-                )
+                NR = rest_of_realizations, seed = int(seed_sequence[-1].generate_state(1)[0]), **general_parameters
             )
+        )
     
     return tasks
 
@@ -338,12 +344,12 @@ def _check_num_chunks(num_chunks: int | None, num_workers: int) -> int:
     ValueError
         If num_chunks is not a positive integer.
     """
-    if num_chunks <= 0 or not isinstance(num_chunks, int):
+    if num_chunks is None:
+        return num_workers
+    if not isinstance(num_chunks, int) or num_chunks <= 0:
         raise ValueError("num_chunks must be a positive integer")
     if num_chunks < num_workers:
         warnings.warn("num_chunks is less than num_workers. Setting num_chunks to num_workers.")
-        return num_workers
-    if num_chunks is None:
         return num_workers
     return num_chunks
 
@@ -396,10 +402,13 @@ def dask_MC_Simulations(
     tuple[dict[str, dict[str, NDArray[np.float64]]], object]
         A tuple containing the averaged measures and the Dask task tree.
     """
-    seed_sequence = _get_seed_sequence(seed, num_chunks)
     num_chunks = _check_num_chunks(num_chunks, num_workers)
     _check_scheduler_value(scheduler)
     _check_numba_algorithms(algorithms, scheduler)
+
+    rest_of_realizations = NR % num_chunks
+    number_of_seeds = num_chunks + (1 if rest_of_realizations > 0 else 0)
+    seed_sequence = _get_seed_sequence(seed, number_of_seeds)
 
     general_parameters = {
         "N": N,

@@ -5,6 +5,8 @@ All metrics are defined as functions that take the algorithm output, noise signa
 Some metrics may include additional optional arguments for specific evaluation criteria using lambda functions.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import filters
 
