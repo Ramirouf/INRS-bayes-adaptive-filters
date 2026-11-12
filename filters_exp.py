@@ -12,6 +12,10 @@ from numba_progress import ProgressBar
 from collections import namedtuple
 from dask.diagnostics import ProgressBar as dask_PB
 from typing import Any
+from pathlib import Path
+import os
+import yaml
+import metrics
 
 from numpy.typing import NDArray
 
@@ -783,3 +787,487 @@ def interactive_grid_search_heatmap(
   # Initial render
   update_plot()
   return ui
+
+
+def _validate_numeric(val: Any, param_name: str) -> float | int:
+  """Validate that a parameter is strictly numeric and not a string expression."""
+  if isinstance(val, str):
+    raise TypeError(
+        f"Parameter '{param_name}' must be numeric, got string '{val}'. "
+        "String expressions are not allowed; please provide numeric values directly."
+    )
+  if not isinstance(val, (int, float, np.integer, np.floating)):
+    raise TypeError(
+        f"Parameter '{param_name}' must be numeric, got {type(val).__name__}: {val}"
+    )
+  return val
+
+
+def _validate_numeric_array(val: Any, param_name: str) -> NDArray[np.float64]:
+  """Validate that a parameter is a list/sequence of numbers and convert to a float64 NDArray."""
+  if isinstance(val, str):
+    raise TypeError(
+        f"Parameter '{param_name}' must be a sequence of numbers, got string '{val}'. "
+        "String expressions are not allowed; please provide numeric values directly."
+    )
+  if not isinstance(val, (list, tuple, np.ndarray)):
+    raise TypeError(
+        f"Parameter '{param_name}' must be a list or array of numbers, got {type(val).__name__}."
+    )
+  for item in val:
+    if isinstance(item, str):
+      raise TypeError(
+          f"Elements of parameter '{param_name}' must be numeric, got string '{item}'. "
+          "String expressions are not allowed; please provide numeric values directly."
+      )
+    if not isinstance(item, (int, float, np.integer, np.floating)):
+      raise TypeError(
+          f"Elements of parameter '{param_name}' must be numeric, got {type(item).__name__}: {item}"
+      )
+  return np.asarray(val, dtype=np.float64)
+
+
+def load_experiment_configs(folder_path: str | Path) -> dict[str, Any]:
+  """Load and validate standardized environment and algorithm YAML configuration files.
+
+  Expects 'environment_config.yml' and 'algorithm_config.yml' inside folder_path.
+  Raises FileNotFoundError if either file is missing.
+  Raises TypeError if any numeric parameter is provided as a string expression.
+
+  Parameters
+  ----------
+  folder_path : str or Path
+    Path to the experiment folder containing the configuration files.
+
+  Returns
+  -------
+  dict[str, Any]
+    Dictionary containing parsed and validated parameters ready for grid_search.
+  """
+  folder = Path(folder_path)
+  env_file = folder / "environment_config.yml"
+  alg_file = folder / "algorithm_config.yml"
+
+  if not env_file.is_file():
+    raise FileNotFoundError(
+        f"Environment configuration file not found: {env_file.resolve()}"
+    )
+  if not alg_file.is_file():
+    raise FileNotFoundError(
+        f"Algorithm configuration file not found: {alg_file.resolve()}"
+    )
+
+  with open(env_file, 'r') as f:
+    env_cfg = yaml.safe_load(f) or {}
+  with open(alg_file, 'r') as f:
+    alg_cfg = yaml.safe_load(f) or {}
+
+  # Validate simulation / Monte Carlo parameters
+  N = int(_validate_numeric(env_cfg.get('N', 50000), 'N'))
+  NR = int(_validate_numeric(env_cfg.get('NR', 256), 'NR'))
+  num_workers = int(_validate_numeric(env_cfg.get('num_workers', 4), 'num_workers'))
+  num_chunks = int(_validate_numeric(env_cfg.get('num_chunks', 8), 'num_chunks'))
+  seed = int(_validate_numeric(env_cfg.get('seed', 42), 'seed'))
+
+  # Plant & system setup
+  L = int(_validate_numeric(env_cfg['L'], 'L'))
+  plant_type = env_cfg.get('plant_type', 'normalized_sinc')
+  if plant_type == 'normalized_sinc':
+    ho = np.sinc(np.linspace(0, 1, L))
+    ho = ho / np.linalg.norm(ho)
+  elif plant_type == 'custom':
+    ho = _validate_numeric_array(env_cfg['ho'], 'ho')
+  else:
+    raise ValueError(f"Unknown plant_type: {plant_type}")
+
+  h0 = np.zeros(L, dtype=np.float64)
+  AR = _validate_numeric_array(env_cfg['AR'], 'AR')
+  var_x = float(_validate_numeric(env_cfg['var_x'], 'var_x'))
+
+  # Environment behavior and parameter namedtuple
+  behavior_name = env_cfg['behavior']
+  if not hasattr(filters, behavior_name):
+    raise AttributeError(f"Environment behavior '{behavior_name}' not found in filters module.")
+  environment = getattr(filters, behavior_name)
+
+  env_param_cls_name = env_cfg['parameters_class']
+  if not hasattr(filters, env_param_cls_name):
+    raise AttributeError(f"Environment parameters class '{env_param_cls_name}' not found in filters module.")
+  env_param_cls = getattr(filters, env_param_cls_name)
+
+  # Build environment parameters namedtuple
+  env_kwargs = {}
+  for field in env_param_cls._fields:
+    if field == 'ho':
+      env_kwargs['ho'] = ho
+    elif field == 'AR':
+      env_kwargs['AR'] = AR
+    elif field == 'var_x':
+      env_kwargs['var_x'] = var_x
+    elif field in env_cfg:
+      env_kwargs[field] = float(_validate_numeric(env_cfg[field], field))
+    else:
+      raise ValueError(f"Missing required field '{field}' in {env_file}")
+  env_parameters = env_param_cls(**env_kwargs)
+
+  # Algorithm specification
+  alg_name = alg_cfg['algorithm']
+  if not hasattr(filters, alg_name):
+    raise AttributeError(f"Algorithm '{alg_name}' not found in filters module.")
+  algorithm = getattr(filters, alg_name)
+
+  alg_param_cls_name = alg_cfg.get('algorithm_parameter_class')
+  algorithm_parameter_class = (
+      getattr(filters, alg_param_cls_name)
+      if alg_param_cls_name and hasattr(filters, alg_param_cls_name)
+      else None
+  )
+
+  # Performance parameters (fixed)
+  perf_raw = alg_cfg.get('performance_parameters', {})
+  if not isinstance(perf_raw, dict):
+    raise TypeError("performance_parameters in algorithm_config.yml must be a mapping (dict).")
+  algorithm_performance_parameters = {}
+  for k, v in perf_raw.items():
+    algorithm_performance_parameters[k] = float(_validate_numeric(v, k))
+
+  # Convergence parameters grid
+  conv_raw = alg_cfg.get('convergence_parameters', {})
+  if not isinstance(conv_raw, dict):
+    raise TypeError("convergence_parameters in algorithm_config.yml must be a mapping (dict).")
+  algorithm_convergence_parameters = {}
+  for k, v in conv_raw.items():
+    algorithm_convergence_parameters[k] = _validate_numeric_array(v, k)
+
+  # Baseline algorithm & parameters for comparative learning curves
+  base_alg_name = alg_cfg.get('baseline_algorithm')
+  baseline_algorithm = (
+      getattr(filters, base_alg_name)
+      if base_alg_name and hasattr(filters, base_alg_name)
+      else None
+  )
+  base_cls_name = alg_cfg.get('baseline_parameter_class')
+  baseline_parameter_class = (
+      getattr(filters, base_cls_name)
+      if base_cls_name and hasattr(filters, base_cls_name)
+      else None
+  )
+  noise_param_name = alg_cfg.get('noise_param_name', 'var_eta')
+
+  # Optimization metrics
+  perf_metric_name = alg_cfg.get('performance_metric', 'squared_deviation')
+  if hasattr(metrics, perf_metric_name):
+    performance_metric = getattr(metrics, perf_metric_name)
+  else:
+    raise AttributeError(f"Performance metric '{perf_metric_name}' not found in metrics module.")
+
+  conv_metric_name = alg_cfg.get('convergence_metric', 'db_area_of_convergence')
+  if conv_metric_name == 'db_area_of_convergence':
+    convergence_metric = db_area_of_convergence
+  elif conv_metric_name == 'time_to_convergence':
+    convergence_metric = time_to_convergence
+  elif hasattr(metrics, conv_metric_name):
+    convergence_metric = getattr(metrics, conv_metric_name)
+  else:
+    raise AttributeError(f"Convergence metric '{conv_metric_name}' not found.")
+
+  floor_estimate_samples = int(
+      _validate_numeric(alg_cfg.get('floor_estimate_samples', 100), 'floor_estimate_samples')
+  )
+  minimize_convergence_metric = bool(
+      alg_cfg.get('minimize_convergence_metric', True)
+  )
+
+  return {
+      'folder': folder,
+      'N': N,
+      'NR': NR,
+      'num_workers': num_workers,
+      'num_chunks': num_chunks,
+      'seed': seed,
+      'L': L,
+      'ho': ho,
+      'h0': h0,
+      'environment': environment,
+      'environment_parameters': env_parameters,
+      'algorithm': algorithm,
+      'algorithm_parameter_class': algorithm_parameter_class,
+      'algorithm_performance_parameters': algorithm_performance_parameters,
+      'algorithm_convergence_parameters': algorithm_convergence_parameters,
+      'baseline_algorithm': baseline_algorithm,
+      'baseline_parameter_class': baseline_parameter_class,
+      'noise_param_name': noise_param_name,
+      'performance_metric': performance_metric,
+      'convergence_metric': convergence_metric,
+      'floor_estimate_samples': floor_estimate_samples,
+      'minimize_convergence_metric': minimize_convergence_metric,
+  }
+
+
+def plot_grid_search_learning_curves(
+    grid_results: dict[str, Any],
+    environment: Callable,
+    environment_parameters: object,
+    h0: NDArray[np.float64],
+    baseline_algorithm: Callable | None = None,
+    baseline_parameter_class: type | None = None,
+    noise_param_name: str = 'var_eta',
+    noise_param_val: float | None = None,
+    fast_epsilon_key: str = 'epsilon_1',
+    slow_epsilon_key: str = 'epsilon_2',
+    v_tilde_0: float = 1.0,
+    N: int = 50000,
+    NR: int = 256,
+    num_workers: int = 4,
+    num_chunks: int = 8,
+    seed: int = 42,
+    figsize: tuple[float, float] = (10, 6),
+) -> plt.Figure:
+  """Plot comparative MSD learning curves for optimal, median, and worst grid configurations vs constituent baselines.
+
+  Parameters
+  ----------
+  grid_results : dict
+    Output dictionary returned by grid_search.
+  environment : Callable
+    Environment generator behavior function.
+  environment_parameters : object
+    Environment parameters namedtuple.
+  h0 : NDArray[np.float64]
+    Initial filter taps.
+  baseline_algorithm : Callable, optional
+    Constituent baseline algorithm function (e.g. sKF_algorithm).
+  baseline_parameter_class : type, optional
+    Parameter namedtuple for the baseline algorithm (e.g. sKF_parameters).
+  noise_param_name : str, optional
+    Name of the noise variance/scale parameter in baseline ('var_eta' or 'b_eta').
+  noise_param_val : float, optional
+    Value of the observation noise parameter. If None, extracts from grid_results.
+  fast_epsilon_key : str, optional
+    Key name for the fast filter process noise variance.
+  slow_epsilon_key : str, optional
+    Key name for the slow filter process noise variance.
+  v_tilde_0 : float, optional
+    Initial variance estimate.
+  N : int, optional
+    Number of iterations.
+  NR : int, optional
+    Number of Monte Carlo realizations.
+  num_workers : int, optional
+    Number of Dask workers.
+  num_chunks : int, optional
+    Number of chunks.
+  seed : int, optional
+    Random seed.
+  figsize : tuple, optional
+    Figure dimensions.
+
+  Returns
+  -------
+  plt.Figure
+    The created matplotlib figure.
+  """
+  c_grid = grid_results['convergence_grid']
+  opt_idx = grid_results['optimal_index']
+  worst_flat = np.nanargmax(c_grid)
+  worst_idx = np.unravel_index(worst_flat, c_grid.shape)
+
+  valid_scores = c_grid[~np.isnan(c_grid)]
+  median_val = np.median(valid_scores)
+  median_flat = np.argmin(np.abs(c_grid - median_val))
+  median_idx = np.unravel_index(median_flat, c_grid.shape)
+
+  best_label = grid_results['labels_grid'][opt_idx]
+  worst_label = grid_results['labels_grid'][worst_idx]
+  median_label = grid_results['labels_grid'][median_idx]
+
+  msd_best = default_db_scale(grid_results['measures'][best_label]['performance'])
+  msd_worst = default_db_scale(grid_results['measures'][worst_label]['performance'])
+  msd_median = default_db_scale(grid_results['measures'][median_label]['performance'])
+
+  has_baselines = baseline_algorithm is not None and baseline_parameter_class is not None
+  msd_fast = None
+  msd_slow = None
+  eps_fast = grid_results['best_parameters'].get(fast_epsilon_key, 1e-5)
+  perf_params = grid_results.get('algorithm_performance_parameters', {})
+  eps_slow = perf_params.get(slow_epsilon_key, 5e-9)
+
+  if has_baselines:
+    if noise_param_val is None:
+      noise_param_val = perf_params.get(noise_param_name, 1e-3)
+
+    fast_kwargs = {
+        'label': 'Fast Baseline',
+        'epsilon': eps_fast,
+        noise_param_name: noise_param_val,
+        'v_tilde_0': v_tilde_0,
+    }
+    slow_kwargs = {
+        'label': 'Slow Baseline',
+        'epsilon': eps_slow,
+        noise_param_name: noise_param_val,
+        'v_tilde_0': v_tilde_0,
+    }
+    fast_param = baseline_parameter_class(**fast_kwargs)
+    slow_param = baseline_parameter_class(**slow_kwargs)
+
+    baseline_measures, _ = mc.dask_MC_Simulations(
+        N=N,
+        NR=NR,
+        environment_parameters=environment_parameters,
+        environment=environment,
+        algorithms=[baseline_algorithm, baseline_algorithm],
+        algorithms_parameters=[fast_param, slow_param],
+        desired_metrics={'MSD': metrics.squared_deviation},
+        h0=h0,
+        num_workers=num_workers,
+        num_chunks=num_chunks,
+        seed=seed,
+    )
+    msd_fast = default_db_scale(baseline_measures['Fast Baseline']['MSD'])
+    msd_slow = default_db_scale(baseline_measures['Slow Baseline']['MSD'])
+
+  fig, ax = plt.subplots(figsize=figsize)
+  ax.plot(
+      msd_best,
+      color='crimson',
+      lw=2.2,
+      label=f"Optimal ({grid_results['best_metric_value']:.1f} dB*iter)",
+  )
+  ax.plot(
+      msd_median,
+      color='orange',
+      lw=1.5,
+      ls='--',
+      label=f"Median ({c_grid[median_idx]:.1f} dB*iter)",
+  )
+  ax.plot(
+      msd_worst,
+      color='brown',
+      lw=1.2,
+      ls=':',
+      label=f"Worst ({c_grid[worst_idx]:.1f} dB*iter)",
+  )
+
+  if msd_fast is not None:
+    ax.plot(
+        msd_fast,
+        color='blue',
+        lw=1.2,
+        ls='-.',
+        alpha=0.7,
+        label=f"Fast Baseline ({fast_epsilon_key}={eps_fast:.1e})",
+    )
+  if msd_slow is not None:
+    ax.plot(
+        msd_slow,
+        color='green',
+        lw=1.2,
+        ls='-.',
+        alpha=0.7,
+        label=f"Slow Baseline ({slow_epsilon_key}={eps_slow:.1e})",
+    )
+
+  ax.set_xlabel("Iteration", fontsize=11)
+  ax.set_ylabel("Normalized MSD [dB]", fontsize=11)
+  ax.set_title("MSD Learning Curves: Optimal vs. Worst, Median & Baselines", fontsize=13)
+  ax.grid(True, alpha=0.3)
+  ax.legend(fontsize=9, loc='upper right')
+
+  min_val = np.nanmin(msd_best)
+  if msd_slow is not None:
+    min_val = min(min_val, np.nanmin(msd_slow))
+  ax.set_ylim([min_val - 3, 5])
+  plt.tight_layout()
+  return fig
+
+
+def run_grid_search_experiment(
+    folder_path: str | Path,
+    save_figures: bool = True,
+) -> dict[str, Any]:
+  """Run a complete grid search experiment loaded from standardized YAML configs and save figures as PDFs.
+
+  Parameters
+  ----------
+  folder_path : str or Path
+    Path to the experiment folder containing 'environment_config.yml' and 'algorithm_config.yml'.
+  save_figures : bool, optional
+    Whether to generate and save PDF figures in '<folder_path>/figures/'.
+
+  Returns
+  -------
+  dict[str, Any]
+    Result dictionary from grid_search with additional metadata.
+  """
+  cfg = load_experiment_configs(folder_path)
+
+  grid_results = grid_search(
+      N=cfg['N'],
+      NR=cfg['NR'],
+      h0=cfg['h0'],
+      environment=cfg['environment'],
+      environment_parameters=cfg['environment_parameters'],
+      algorithm=cfg['algorithm'],
+      algorithm_convergence_parameters=cfg['algorithm_convergence_parameters'],
+      algorithm_performance_parameters=cfg['algorithm_performance_parameters'],
+      performance_metric=cfg['performance_metric'],
+      convergence_metric=cfg['convergence_metric'],
+      floor_estimate_samples=cfg['floor_estimate_samples'],
+      num_workers=cfg['num_workers'],
+      num_chunks=cfg['num_chunks'],
+      seed=cfg['seed'],
+      minimize_convergence_metric=cfg['minimize_convergence_metric'],
+  )
+  # Store performance parameters in grid_results for downstream use
+  grid_results['algorithm_performance_parameters'] = cfg['algorithm_performance_parameters']
+
+  if save_figures:
+    fig_dir = Path(folder_path) / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Metric histograms
+    fig_hist = plot_grid_search_histograms(grid_results)
+    hist_path = fig_dir / "metric_histograms.pdf"
+    fig_hist.savefig(hist_path, format='pdf', bbox_inches='tight')
+    plt.close(fig_hist)
+
+    # 2. Pairwise heatmaps (convergence)
+    fig_conv = plot_grid_search_pairwise_heatmaps(grid_results, metric_type='convergence')
+    conv_path = fig_dir / "pairwise_heatmaps_convergence.pdf"
+    fig_conv.savefig(conv_path, format='pdf', bbox_inches='tight')
+    plt.close(fig_conv)
+
+    # 3. Pairwise heatmaps (steady-state)
+    fig_ss = plot_grid_search_pairwise_heatmaps(grid_results, metric_type='steady_state')
+    ss_path = fig_dir / "pairwise_heatmaps_steady_state.pdf"
+    fig_ss.savefig(ss_path, format='pdf', bbox_inches='tight')
+    plt.close(fig_ss)
+
+    # 4. Learning curves comparison
+    perf_p = cfg['algorithm_performance_parameters']
+    noise_val = perf_p.get(cfg['noise_param_name'])
+    v_0 = perf_p.get('v_tilde_0', 1.0)
+
+    fig_lc = plot_grid_search_learning_curves(
+        grid_results=grid_results,
+        environment=cfg['environment'],
+        environment_parameters=cfg['environment_parameters'],
+        h0=cfg['h0'],
+        baseline_algorithm=cfg['baseline_algorithm'],
+        baseline_parameter_class=cfg['baseline_parameter_class'],
+        noise_param_name=cfg['noise_param_name'],
+        noise_param_val=noise_val,
+        v_tilde_0=v_0,
+        N=cfg['N'],
+        NR=cfg['NR'],
+        num_workers=cfg['num_workers'],
+        num_chunks=cfg['num_chunks'],
+        seed=cfg['seed'],
+    )
+    lc_path = fig_dir / "learning_curves_comparison.pdf"
+    fig_lc.savefig(lc_path, format='pdf', bbox_inches='tight')
+    plt.close(fig_lc)
+
+  return grid_results
+
