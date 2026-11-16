@@ -36,29 +36,37 @@ def _PBbar_update(PBar: ProgressBar | str | None, k: int, NR: int) -> None:
         return
     warnings.warn(f'Unrecognized PBar type: {type(PBar)}')
 
-def _measure_init(taps: int, N_iter: int, desired_metrics: dict[str, callable]) -> dict[str, NDArray[np.float64]]:
-    """
-    Initialize the measures dictionary for storing simulation results.
+def _measure_init(
+    taps: int,
+    N_iter: int,
+    desired_metrics: dict[str, callable],
+    store_weights: bool = False,
+) -> dict[str, NDArray[np.float64]]:
+  """Initialize the measures dictionary for storing simulation results.
 
-    Parameters:
-    taps (int): Number of filter taps.
-    N_iter (int): Number of iterations per simulation.
-    desired_metrics (dict[str, callable]): Dictionary of metric functions to evaluate the algorithms.
+  Parameters:
+  taps (int): Number of filter taps.
+  N_iter (int): Number of iterations per simulation.
+  desired_metrics (dict[str, callable]): Dictionary of metric functions to evaluate the algorithms.
+  store_weights (bool): Whether to allocate and store filter weights 'h' and variance 'var' (default False).
 
-    Returns:
-    dict[str, NDArray[np.float64]]: Dictionary containing initialized measures.
-    """
-    measures = {'h': np.zeros((N_iter, taps)),
-                'var': np.zeros((N_iter, taps))}
-    for key in desired_metrics:
-        measures[key] = np.zeros(N_iter)
-    return measures
+  Returns:
+  dict[str, NDArray[np.float64]]: Dictionary containing initialized measures.
+  """
+  measures = {}
+  if store_weights:
+    measures['h'] = np.zeros((N_iter, taps))
+    measures['var'] = np.zeros((N_iter, taps))
+  for key in desired_metrics:
+    measures[key] = np.zeros(N_iter)
+  return measures
 
 def _average_measures(
     measures: dict[str, dict[str, NDArray[np.float64]]], 
     Parameters: tuple[object], 
     desired_metrics: dict[str, callable], 
-    NR: int
+    NR: int,
+    store_weights: bool = False
     ) -> dict[str, dict[str, NDArray[np.float64]]]:
     """
     Average the measures over multiple realizations.
@@ -73,6 +81,8 @@ def _average_measures(
         Dictionary of metric functions to evaluate the algorithms.
     NR : int
         Number of realizations.
+    store_weights : bool, optional
+        Whether filter weights 'h' and variance 'var' were stored and should be averaged (default False).
 
     Returns
     -------
@@ -82,8 +92,10 @@ def _average_measures(
     avg_measures = copy.deepcopy(measures)
     for par in Parameters:
         label = par.label
-        avg_measures[label]['h'] /= NR
-        avg_measures[label]['var'] /= NR
+        if store_weights and 'h' in avg_measures[label]:
+            avg_measures[label]['h'] /= NR
+        if store_weights and 'var' in avg_measures[label]:
+            avg_measures[label]['var'] /= NR
         for key in desired_metrics:
             avg_measures[label][key] /= NR
     return avg_measures
@@ -99,7 +111,8 @@ def MC_Simulations(
     h0: NDArray[np.float64],
     PBar: ProgressBar = None,
     average: bool = True,
-    seed: int = None) -> dict[str, dict[str, NDArray[np.float64]]]:
+    seed: int = None,
+    store_weights: bool = False) -> dict[str, dict[str, NDArray[np.float64]]]:
     """
     Monte Carlo Simulations for adaptive filters.
 
@@ -127,6 +140,8 @@ def MC_Simulations(
         Whether to average the measures over realizations.
     seed : int, optional
         Random seed for reproducibility.
+    store_weights : bool, optional
+        Whether to allocate and store filter weights 'h' and variance 'var' (default False).
 
     Returns
     -------
@@ -138,7 +153,7 @@ def MC_Simulations(
         _seed_numba(int(seed))
     N_Algorithms = len(algorithms)
     
-    measures = {algorithms_parameters[k].label: _measure_init(L, N, desired_metrics=desired_metrics) for k in range(N_Algorithms)}
+    measures = {algorithms_parameters[k].label: _measure_init(L, N, desired_metrics=desired_metrics, store_weights=store_weights) for k in range(N_Algorithms)}
     
     for k in range(NR):
         ho, signals = environment(N, environment_parameters)
@@ -149,15 +164,16 @@ def MC_Simulations(
             label = algorithms_parameters[c].label
             algorithm_signals = algorithms[c](N, x, d, h0, algorithms_parameters[c])
             
-            measures[label]['h'] += algorithm_signals.h
-            measures[label]['var'] += algorithm_signals.v
+            if store_weights:
+                measures[label]['h'] += algorithm_signals.h
+                measures[label]['var'] += algorithm_signals.v
             for key in desired_metrics:
                 measures[label][key] += desired_metrics[key](algorithm_signals, signals['v'], ho)
 
         _PBbar_update(PBar, k, NR)
     
     if average:
-        return _average_measures(measures, algorithms_parameters, desired_metrics, NR)
+        return _average_measures(measures, algorithms_parameters, desired_metrics, NR, store_weights=store_weights)
     
     return measures
 
@@ -365,7 +381,8 @@ def dask_MC_Simulations(
     num_workers: int = 1,
     num_chunks: int = None,
     seed: int = None,
-    scheduler: str = "threads"
+    scheduler: str = "threads",
+    store_weights: bool = False
     ) -> tuple[dict[str, dict[str, NDArray[np.float64]]], object]:
     """
     Perform Monte Carlo simulations using Dask for parallel execution.
@@ -396,6 +413,8 @@ def dask_MC_Simulations(
         Random seed for reproducibility (default is None).
     scheduler : str, optional
         Dask scheduler to use ("threads" or "processes", default is "threads").
+    store_weights : bool, optional
+        Whether to allocate and store filter weights 'h' and variance 'var' (default False).
 
     Returns
     -------
@@ -418,7 +437,8 @@ def dask_MC_Simulations(
         "algorithms_parameters": algorithms_parameters,
         "desired_metrics": desired_metrics,
         "h0": h0,
-        "average": False
+        "average": False,
+        "store_weights": store_weights
     }
     tasks = _create_task_list(NR, num_chunks, seed_sequence, general_parameters)
     tasks_tree = _create_tasks_tree(tasks)
@@ -427,6 +447,6 @@ def dask_MC_Simulations(
         extra = {"chunksize": 1} if scheduler == "processes" else {}
         measures = dask.compute(tasks_tree, num_workers=num_workers, scheduler=scheduler, **extra)[0]
 
-    avg_measures = _average_measures(measures, algorithms_parameters, desired_metrics, NR)
+    avg_measures = _average_measures(measures, algorithms_parameters, desired_metrics, NR, store_weights=store_weights)
 
     return avg_measures, tasks_tree
