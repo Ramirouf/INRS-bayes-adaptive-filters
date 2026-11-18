@@ -120,6 +120,10 @@ def run_single_experiment(experiment_dir: Path) -> None:
   print("\nOptimal Hyperparameters Found:")
   for k, v in results['best_parameters'].items():
     print(f"  {k}*: {v}")
+  if results.get('convergence_metric_target') is not None:
+    print(f"Convergence Metric: {results.get('convergence_metric_name', 'db_accumulated_target_error')}")
+    print(f"  Target: {results['convergence_metric_target']:.2f} dB (Lowest-Slope Window Mean, Slow Baseline: {results.get('slow_baseline_min', 0.0):.2f} dB)")
+    print(f"  Tolerance: ±{results.get('convergence_metric_tolerance', 0.2):.2f} dB")
   print(f"Best Convergence Metric Value: {results['best_metric_value']:.2f}")
   print(f"Steady-State MSD at Optimal: {results['best_steady_state']:.2f} dB")
 

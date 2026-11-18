@@ -44,6 +44,33 @@ def db_area_of_convergence(db_metric: np.typing.NDArray[np.float64]) -> np.float
   area_of_convergence = np.sum(db_metric - floor)
   return area_of_convergence
 
+def db_accumulated_target_error(
+    db_metric: np.typing.NDArray[np.float64],
+    target: float | np.floating,
+    tolerance: float | np.floating = 0.2,
+    **kwargs: Any,
+) -> float:
+  """Compute the accumulated target error of the given dB metric.
+
+  Parameters
+  ----------
+  db_metric : NDArray[np.float64]
+    Array of metric values in dB.
+  target : float
+    Target value in dB (e.g. minimum value of the slow filter).
+  tolerance : float, optional
+    Tolerance around the target in dB (default: 0.2 dB).
+  **kwargs : Any
+    Additional keyword arguments (ignored, for interface compatibility).
+
+  Returns
+  -------
+  float
+    Accumulated target error.
+  """
+  error = np.maximum(np.abs(db_metric - target) - tolerance, 0.0)
+  return float(np.sum(error))
+
 def time_to_convergence(db_metric: np.typing.NDArray[np.float64],
                         cutoff: np.float64 = -3.0,
                         dt: np.float64 = 1.0) -> int:
@@ -95,6 +122,51 @@ def mean_absolute_steady_state_derivative(db_metric: np.typing.NDArray[np.float6
   steady_state = db_metric[-floor_estimate_samples:]
   derivative = np.diff(steady_state)
   return np.mean(np.abs(derivative))
+
+
+def find_minimum_lowest_slope(
+    db_metric: np.typing.NDArray[np.float64],
+    n_slope_samples: int = 1000,
+) -> tuple[float, int, dict[str, Any]]:
+  """Find the minimum/floor of a dB metric array by locating the window with lowest mean absolute slope.
+
+  Parameters
+  ----------
+  db_metric : NDArray[np.float64]
+    Array of metric values in dB.
+  n_slope_samples : int, optional
+    Window size in samples (default: 1000).
+
+  Returns
+  -------
+  target_val : float
+    Mean metric value in the window with the lowest point-to-point mean absolute derivative.
+  best_window_start : int
+    Start index of the window with the lowest slope.
+  diagnostics : dict[str, Any]
+    Diagnostic information including 'window_slopes', 'best_window_center', and 'n_slope_samples'.
+  """
+  if len(db_metric) < n_slope_samples:
+    raise ValueError(
+        f"Input array length ({len(db_metric)}) must be >= n_slope_samples ({n_slope_samples})."
+    )
+
+  abs_diff = np.abs(np.diff(db_metric))
+  kernel = np.ones(n_slope_samples - 1, dtype=np.float64) / float(n_slope_samples - 1)
+  window_slopes = np.convolve(abs_diff, kernel, mode='valid')
+
+  best_idx = int(np.nanargmin(window_slopes))
+  target_val = float(np.mean(db_metric[best_idx : best_idx + n_slope_samples]))
+
+  diagnostics = {
+      'window_slopes': window_slopes,
+      'best_window_start': best_idx,
+      'best_window_end': best_idx + n_slope_samples,
+      'best_window_center': best_idx + n_slope_samples // 2,
+      'min_slope': float(window_slopes[best_idx]),
+      'n_slope_samples': n_slope_samples,
+  }
+  return target_val, best_idx, diagnostics
 
 # Perform a grid search on algorithms for a given target MSD, optimizing for convergence speed
 def default_db_scale(array: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -171,6 +243,10 @@ def grid_search(
     seed: int | None = None,
     minimize_convergence_metric: bool = True,
     scheduler: str = "threads",
+    baseline_algorithm: Callable | None = None,
+    baseline_parameter_class: type | None = None,
+    noise_param_name: str = 'var_eta',
+    noise_param_val: float | None = None,
     algortihm_performance_parameters: object = None,
 ) -> dict[str, Any]:
   """Perform a generic grid search on adaptive filter hyperparameters.
@@ -296,9 +372,27 @@ def grid_search(
     )
     param_objects.append(param_obj)
 
-  # Run Monte Carlo simulations
+  # Run Monte Carlo simulations (including slow baseline filter if provided)
   desired_metrics = {'performance': performance_metric}
   algorithms_list = [algorithm] * len(param_objects)
+  slow_label = None
+  slow_curve = None
+  slow_min = None
+
+  if baseline_algorithm is not None and baseline_parameter_class is not None:
+    eps_slow = float(perf_dict.get('epsilon_2', 5e-9))
+    noise_val = noise_param_val if noise_param_val is not None else float(perf_dict.get(noise_param_name, 1e-3))
+    v_tilde_0 = float(perf_dict.get('v_tilde_0', 1.0))
+    slow_label = f"{alg_name}_slow_baseline"
+    slow_kwargs = {
+        'label': slow_label,
+        'epsilon': eps_slow,
+        noise_param_name: noise_val,
+        'v_tilde_0': v_tilde_0,
+    }
+    slow_param_obj = baseline_parameter_class(**slow_kwargs)
+    param_objects.append(slow_param_obj)
+    algorithms_list.append(baseline_algorithm)
 
   res, _ = mc.dask_MC_Simulations(
       N=N,
@@ -314,6 +408,43 @@ def grid_search(
       seed=seed,
       scheduler=scheduler,
   )
+
+  slow_curve = None
+  slow_min = None
+  slow_min_idx = None
+  slow_diag = None
+
+  if convergence_metric_parameters is None:
+    convergence_metric_parameters = {}
+  else:
+    convergence_metric_parameters = dict(convergence_metric_parameters)
+
+  n_slope_samples = int(convergence_metric_parameters.get('n_slope_samples', 1000))
+
+  if slow_label is not None and slow_label in res:
+    slow_perf = res[slow_label]['performance']
+    slow_curve = performance_metric_scale(slow_perf)
+    slow_min, slow_min_idx, slow_diag = find_minimum_lowest_slope(
+        slow_curve, n_slope_samples=n_slope_samples
+    )
+
+  is_target_error = (
+      convergence_metric == db_accumulated_target_error
+      or getattr(convergence_metric, '__name__', '') == 'db_accumulated_target_error'
+  )
+  if is_target_error:
+    if 'target' not in convergence_metric_parameters or convergence_metric_parameters['target'] is None:
+      if slow_min is not None:
+        convergence_metric_parameters['target'] = slow_min
+      else:
+        raise ValueError(
+            "Convergence metric 'db_accumulated_target_error' requires 'target' parameter, "
+            "or a baseline_algorithm/baseline_parameter_class to compute the slow filter minimum."
+        )
+    if 'tolerance' not in convergence_metric_parameters or convergence_metric_parameters['tolerance'] is None:
+      convergence_metric_parameters['tolerance'] = 0.2
+    if 'n_slope_samples' not in convergence_metric_parameters:
+      convergence_metric_parameters['n_slope_samples'] = n_slope_samples
 
   convergence_grid = np.full(grid_shape, np.nan, dtype=np.float64)
   steady_state_grid = np.full(grid_shape, np.nan, dtype=np.float64)
@@ -379,6 +510,14 @@ def grid_search(
       'measures': res,
       'best_label': best_label,
       'labels_grid': labels_grid,
+      'slow_baseline_curve': slow_curve,
+      'slow_baseline_min': slow_min,
+      'slow_baseline_min_idx': slow_min_idx,
+      'slow_baseline_diagnostics': slow_diag,
+      'convergence_metric_name': getattr(convergence_metric, '__name__', str(convergence_metric)),
+      'convergence_metric_target': convergence_metric_parameters.get('target'),
+      'convergence_metric_tolerance': convergence_metric_parameters.get('tolerance'),
+      'n_slope_samples': n_slope_samples,
   }
 
 
@@ -900,8 +1039,10 @@ def load_experiment_configs(folder_path: str | Path) -> dict[str, Any]:
   else:
     raise AttributeError(f"Performance metric '{perf_metric_name}' not found in metrics module.")
 
-  conv_metric_name = alg_cfg.get('convergence_metric', 'db_area_of_convergence')
-  if conv_metric_name == 'db_area_of_convergence':
+  conv_metric_name = alg_cfg.get('convergence_metric', 'db_accumulated_target_error')
+  if conv_metric_name == 'db_accumulated_target_error':
+    convergence_metric = db_accumulated_target_error
+  elif conv_metric_name == 'db_area_of_convergence':
     convergence_metric = db_area_of_convergence
   elif conv_metric_name == 'time_to_convergence':
     convergence_metric = time_to_convergence
@@ -909,6 +1050,22 @@ def load_experiment_configs(folder_path: str | Path) -> dict[str, Any]:
     convergence_metric = getattr(metrics, conv_metric_name)
   else:
     raise AttributeError(f"Convergence metric '{conv_metric_name}' not found.")
+
+  conv_params_raw = alg_cfg.get('convergence_metric_parameters', {})
+  if not isinstance(conv_params_raw, dict):
+    raise TypeError("convergence_metric_parameters in algorithm_config.yml must be a mapping (dict).")
+  convergence_metric_parameters = {}
+  for k, v in conv_params_raw.items():
+    if v is not None:
+      if k == 'n_slope_samples':
+        convergence_metric_parameters[k] = int(_validate_numeric(v, k))
+      else:
+        convergence_metric_parameters[k] = float(_validate_numeric(v, k))
+  if conv_metric_name == 'db_accumulated_target_error':
+    if 'tolerance' not in convergence_metric_parameters:
+      convergence_metric_parameters['tolerance'] = 0.2
+    if 'n_slope_samples' not in convergence_metric_parameters:
+      convergence_metric_parameters['n_slope_samples'] = 1000
 
   floor_estimate_samples = int(
       _validate_numeric(alg_cfg.get('floor_estimate_samples', 100), 'floor_estimate_samples')
@@ -938,6 +1095,7 @@ def load_experiment_configs(folder_path: str | Path) -> dict[str, Any]:
       'noise_param_name': noise_param_name,
       'performance_metric': performance_metric,
       'convergence_metric': convergence_metric,
+      'convergence_metric_parameters': convergence_metric_parameters,
       'floor_estimate_samples': floor_estimate_samples,
       'minimize_convergence_metric': minimize_convergence_metric,
   }
@@ -1041,51 +1199,72 @@ def plot_grid_search_learning_curves(
         noise_param_name: noise_param_val,
         'v_tilde_0': v_tilde_0,
     }
-    slow_kwargs = {
-        'label': 'Slow Baseline',
-        'epsilon': eps_slow,
-        noise_param_name: noise_param_val,
-        'v_tilde_0': v_tilde_0,
-    }
     fast_param = baseline_parameter_class(**fast_kwargs)
-    slow_param = baseline_parameter_class(**slow_kwargs)
 
-    baseline_measures, _ = mc.dask_MC_Simulations(
-        N=N,
-        NR=NR,
-        environment_parameters=environment_parameters,
-        environment=environment,
-        algorithms=[baseline_algorithm, baseline_algorithm],
-        algorithms_parameters=[fast_param, slow_param],
-        desired_metrics={'MSD': metrics.squared_deviation},
-        h0=h0,
-        num_workers=num_workers,
-        num_chunks=num_chunks,
-        seed=seed,
-    )
-    msd_fast = default_db_scale(baseline_measures['Fast Baseline']['MSD'])
-    msd_slow = default_db_scale(baseline_measures['Slow Baseline']['MSD'])
+    # Reuse slow baseline curve if already computed during grid_search
+    if grid_results.get('slow_baseline_curve') is not None:
+      msd_slow = grid_results['slow_baseline_curve']
+      baseline_measures, _ = mc.dask_MC_Simulations(
+          N=N,
+          NR=NR,
+          environment_parameters=environment_parameters,
+          environment=environment,
+          algorithms=[baseline_algorithm],
+          algorithms_parameters=[fast_param],
+          desired_metrics={'MSD': metrics.squared_deviation},
+          h0=h0,
+          num_workers=num_workers,
+          num_chunks=num_chunks,
+          seed=seed,
+      )
+      msd_fast = default_db_scale(baseline_measures['Fast Baseline']['MSD'])
+    else:
+      slow_kwargs = {
+          'label': 'Slow Baseline',
+          'epsilon': eps_slow,
+          noise_param_name: noise_param_val,
+          'v_tilde_0': v_tilde_0,
+      }
+      slow_param = baseline_parameter_class(**slow_kwargs)
+      baseline_measures, _ = mc.dask_MC_Simulations(
+          N=N,
+          NR=NR,
+          environment_parameters=environment_parameters,
+          environment=environment,
+          algorithms=[baseline_algorithm, baseline_algorithm],
+          algorithms_parameters=[fast_param, slow_param],
+          desired_metrics={'MSD': metrics.squared_deviation},
+          h0=h0,
+          num_workers=num_workers,
+          num_chunks=num_chunks,
+          seed=seed,
+      )
+      msd_fast = default_db_scale(baseline_measures['Fast Baseline']['MSD'])
+      msd_slow = default_db_scale(baseline_measures['Slow Baseline']['MSD'])
+
+  conv_metric_name = grid_results.get('convergence_metric_name', '')
+  unit_str = 'dB' if 'target_error' in conv_metric_name else 'dB*iter'
 
   fig, ax = plt.subplots(figsize=figsize)
   ax.plot(
       msd_best,
       color='crimson',
       lw=2.2,
-      label=f"Optimal ({grid_results['best_metric_value']:.1f} dB*iter)",
+      label=f"Optimal ({grid_results['best_metric_value']:.1f} {unit_str})",
   )
   ax.plot(
       msd_median,
       color='orange',
       lw=1.5,
       ls='--',
-      label=f"Median ({c_grid[median_idx]:.1f} dB*iter)",
+      label=f"Median ({c_grid[median_idx]:.1f} {unit_str})",
   )
   ax.plot(
       msd_worst,
       color='brown',
       lw=1.2,
       ls=':',
-      label=f"Worst ({c_grid[worst_idx]:.1f} dB*iter)",
+      label=f"Worst ({c_grid[worst_idx]:.1f} {unit_str})",
   )
 
   if msd_fast is not None:
@@ -1106,6 +1285,12 @@ def plot_grid_search_learning_curves(
         alpha=0.7,
         label=f"Slow Baseline ({slow_epsilon_key}={eps_slow:.1e})",
     )
+
+  target_val = grid_results.get('convergence_metric_target')
+  if target_val is not None:
+    tol_val = grid_results.get('convergence_metric_tolerance', 0.2)
+    ax.axhline(target_val, color='gray', ls=':', lw=1.2, alpha=0.8, label=f"Target ({target_val:.2f} dB)")
+    ax.axhspan(target_val - tol_val, target_val + tol_val, color='gray', alpha=0.15, label=f"Tolerance (±{tol_val:.2f} dB)")
 
   ax.set_xlabel("Iteration", fontsize=11)
   ax.set_ylabel("Normalized MSD [dB]", fontsize=11)
@@ -1145,6 +1330,9 @@ def run_grid_search_experiment(
   cfg = load_experiment_configs(folder_path)
 
   t_start = time.time()
+  noise_p_name = cfg.get('noise_param_name', 'var_eta')
+  noise_p_val = cfg['algorithm_performance_parameters'].get(noise_p_name)
+
   grid_results = grid_search(
       N=cfg['N'],
       NR=cfg['NR'],
@@ -1154,8 +1342,13 @@ def run_grid_search_experiment(
       algorithm=cfg['algorithm'],
       algorithm_convergence_parameters=cfg['algorithm_convergence_parameters'],
       algorithm_performance_parameters=cfg['algorithm_performance_parameters'],
+      baseline_algorithm=cfg.get('baseline_algorithm'),
+      baseline_parameter_class=cfg.get('baseline_parameter_class'),
+      noise_param_name=noise_p_name,
+      noise_param_val=noise_p_val,
       performance_metric=cfg['performance_metric'],
       convergence_metric=cfg['convergence_metric'],
+      convergence_metric_parameters=cfg.get('convergence_metric_parameters'),
       floor_estimate_samples=cfg['floor_estimate_samples'],
       num_workers=cfg['num_workers'],
       num_chunks=cfg['num_chunks'],
@@ -1195,6 +1388,12 @@ def run_grid_search_experiment(
     summary_dict = {
         'computation_time_seconds': float(round(t_elapsed, 2)),
         'total_combinations': total_combos,
+        'convergence_metric_name': grid_results.get('convergence_metric_name'),
+        'convergence_metric_target': float(grid_results['convergence_metric_target']) if grid_results.get('convergence_metric_target') is not None else None,
+        'convergence_metric_tolerance': float(grid_results['convergence_metric_tolerance']) if grid_results.get('convergence_metric_tolerance') is not None else None,
+        'n_slope_samples': int(grid_results['n_slope_samples']) if grid_results.get('n_slope_samples') is not None else 1000,
+        'slow_baseline_min_db': float(grid_results['slow_baseline_min']) if grid_results.get('slow_baseline_min') is not None else None,
+        'slow_baseline_min_slope': float(grid_results['slow_baseline_diagnostics']['min_slope']) if grid_results.get('slow_baseline_diagnostics') and 'min_slope' in grid_results['slow_baseline_diagnostics'] else None,
         'optimal_convergence_metric': float(grid_results['best_metric_value']),
         'mean_convergence_metric': float(np.mean(valid_conv)) if len(valid_conv) > 0 else None,
         'std_convergence_metric': float(np.std(valid_conv)) if len(valid_conv) > 0 else None,
