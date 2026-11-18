@@ -1463,3 +1463,354 @@ def run_grid_search_experiment(
 
   return grid_results
 
+
+# ==============================================================================
+# Grid Search Cross-Experiment Summary & Distribution Analysis
+# ==============================================================================
+
+def collect_all_optimal_parameters(
+    experiment_dirs: list[str | Path],
+) -> list[dict[str, Any]]:
+  """Collect optimal parameters and summary metrics from a list of experiment directories.
+
+  Parameters
+  ----------
+  experiment_dirs : list of str or Path
+    List of experiment leaf directories.
+
+  Returns
+  -------
+  list of dict
+    A list of dictionaries containing metadata, optimal parameters, and summary metrics.
+  """
+  records: list[dict[str, Any]] = []
+
+  for d in experiment_dirs:
+    p = Path(d)
+    opt_file = p / "optimal_parameters.yml"
+    summary_file = p / "grid_search_summary.yml"
+
+    if not opt_file.is_file():
+      continue
+
+    with open(opt_file, 'r') as f:
+      opt_data = yaml.safe_load(f) or {}
+
+    summary_data = {}
+    if summary_file.is_file():
+      with open(summary_file, 'r') as f:
+        summary_data = yaml.safe_load(f) or {}
+
+    # Extract directory hierarchy metadata:
+    # .../grid_searches/<algorithm>/<environment>/<target_msd>/<input_characteristic>
+    parts = p.parts
+    if 'grid_searches' in parts:
+      idx = parts.index('grid_searches')
+      subparts = parts[idx + 1:]
+      alg = subparts[0] if len(subparts) > 0 else 'unknown'
+      env = subparts[1] if len(subparts) > 1 else 'unknown'
+      target_msd = subparts[2] if len(subparts) > 2 else 'unknown'
+      input_char = subparts[3] if len(subparts) > 3 else 'unknown'
+    else:
+      alg = env = target_msd = input_char = 'unknown'
+
+    rec = {
+        'directory': str(p),
+        'algorithm': alg,
+        'environment': env,
+        'target_msd': target_msd,
+        'input_characteristic': input_char,
+        'mu_a': float(opt_data['mu_a']) if 'mu_a' in opt_data else np.nan,
+        'epsilon_1': float(opt_data['epsilon_1']) if 'epsilon_1' in opt_data else np.nan,
+        'a_plus': float(opt_data['a_plus']) if 'a_plus' in opt_data else np.nan,
+        'l': float(opt_data['l']) if 'l' in opt_data else np.nan,
+        'optimal_convergence_metric': float(summary_data.get('optimal_convergence_metric', np.nan)),
+        'optimal_steady_state_db': float(summary_data.get('optimal_steady_state_db', np.nan)),
+        'computation_time_seconds': float(summary_data.get('computation_time_seconds', np.nan)),
+    }
+    records.append(rec)
+
+  return records
+
+
+def plot_optimal_parameters_histograms(
+    records: list[dict[str, Any]],
+    figsize: tuple[float, float] = (12, 9),
+    title: str = "Histograms of Optimal Hyperparameters Across Grid Searches",
+) -> plt.Figure:
+  """Plot 2x2 categorical histograms of optimal hyperparameters across grid search experiments.
+
+  Parameters
+  ----------
+  records : list of dict
+    List of dictionaries returned by collect_all_optimal_parameters.
+  figsize : tuple of float, optional
+    Figure dimensions (width, height).
+  title : str, optional
+    Overall figure super-title.
+
+  Returns
+  -------
+  plt.Figure
+    The created matplotlib figure.
+  """
+  n_total = len(records)
+  if n_total == 0:
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.text(0.5, 0.5, "No experiment records available.", ha='center', va='center')
+    return fig
+
+  fig, axes = plt.subplots(2, 2, figsize=figsize)
+
+  configs = [
+      {
+          'ax': axes[0, 0],
+          'key': 'mu_a',
+          'name': r'Step Size $\mu_a^*$',
+          'candidates': [1.0, 2.5, 5.0, 7.5, 10.0],
+          'labels': ['1.0', '2.5', '5.0', '7.5', '10.0'],
+          'color': 'steelblue',
+      },
+      {
+          'ax': axes[0, 1],
+          'key': 'epsilon_1',
+          'name': r'Fast Filter Regularization $\epsilon_1^*$',
+          'candidates': [1.0e-06, 1.0e-05, 0.0001, 0.001],
+          'labels': [r'$10^{-6}$', r'$10^{-5}$', r'$10^{-4}$', r'$10^{-3}$'],
+          'color': 'seagreen',
+      },
+      {
+          'ax': axes[1, 0],
+          'key': 'a_plus',
+          'name': r'Asymmetry Parameter $a_+^*$',
+          'candidates': [2.0, 4.0, 8.0, 16.0],
+          'labels': ['2.0', '4.0', '8.0', '16.0'],
+          'color': 'darkorange',
+      },
+      {
+          'ax': axes[1, 1],
+          'key': 'l',
+          'name': r'Leakage Factor $l^*$',
+          'candidates': [0.9375, 0.99375, 0.999375, 0.9999375],
+          'labels': ['0.9375\n(1-1/L)', '0.99375\n(1-0.1/L)', '0.999375\n(1-0.01/L)', '0.9999375\n(1-0.001/L)'],
+          'color': 'purple',
+      },
+  ]
+
+  for cfg in configs:
+    ax = cfg['ax']
+    key = cfg['key']
+    cands = cfg['candidates']
+    x_indices = np.arange(len(cands))
+    vals = [r[key] for r in records if not np.isnan(r[key])]
+
+    counts = [sum(np.isclose(v, c, rtol=1e-5, atol=1e-8) for v in vals) for c in cands]
+
+    bars = ax.bar(x_indices, counts, color=cfg['color'], edgecolor='black', alpha=0.75, width=0.55)
+
+    # Annotate counts and percentages on top of each bar
+    for bar, count in zip(bars, counts):
+      pct = (count / n_total * 100.0) if n_total > 0 else 0.0
+      height = bar.get_height()
+      if height > 0:
+        ax.annotate(
+            f"{count}\n({pct:.1f}%)",
+            xy=(bar.get_x() + bar.get_width() / 2, height),
+            xytext=(0, 3),
+            textcoords="offset points",
+            ha='center',
+            va='bottom',
+            fontsize=9,
+            fontweight='bold',
+        )
+
+    ax.set_xticks(x_indices)
+    ax.set_xticklabels(cfg['labels'], fontsize=9)
+    ax.set_ylabel("Frequency (Count)", fontweight='bold')
+    ax.set_title(cfg['name'], fontsize=11, fontweight='bold')
+    ax.set_ylim([0, max(counts) * 1.25 + 1 if counts else 5])
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--')
+
+  fig.suptitle(f"{title} (N = {n_total} Experiments)", fontsize=13, fontweight='bold')
+  plt.tight_layout()
+  return fig
+
+
+def plot_optimal_parameters_by_group_histograms(
+    records: list[dict[str, Any]],
+    group_key: str = 'algorithm',
+    figsize: tuple[float, float] = (14, 10),
+    title: str | None = None,
+) -> plt.Figure:
+  """Plot 2x2 grouped histograms of optimal hyperparameters broken down by a category.
+
+  Parameters
+  ----------
+  records : list of dict
+    List of dictionaries returned by collect_all_optimal_parameters.
+  group_key : str, optional
+    Key in records to group by ('algorithm', 'input_characteristic', 'environment', 'target_msd').
+  figsize : tuple of float, optional
+    Figure dimensions (width, height).
+  title : str, optional
+    Figure super-title.
+
+  Returns
+  -------
+  plt.Figure
+    The created matplotlib figure.
+  """
+  n_total = len(records)
+  if n_total == 0:
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.text(0.5, 0.5, "No experiment records available.", ha='center', va='center')
+    return fig
+
+  groups = sorted(list(set(r[group_key] for r in records)))
+  n_groups = len(groups)
+  palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+  group_colors = {g: palette[i % len(palette)] for i, g in enumerate(groups)}
+
+  fig, axes = plt.subplots(2, 2, figsize=figsize)
+
+  configs = [
+      {
+          'ax': axes[0, 0],
+          'key': 'mu_a',
+          'name': r'Step Size $\mu_a^*$',
+          'candidates': [1.0, 2.5, 5.0, 7.5, 10.0],
+          'labels': ['1.0', '2.5', '5.0', '7.5', '10.0'],
+      },
+      {
+          'ax': axes[0, 1],
+          'key': 'epsilon_1',
+          'name': r'Fast Filter Regularization $\epsilon_1^*$',
+          'candidates': [1.0e-06, 1.0e-05, 0.0001, 0.001],
+          'labels': [r'$10^{-6}$', r'$10^{-5}$', r'$10^{-4}$', r'$10^{-3}$'],
+      },
+      {
+          'ax': axes[1, 0],
+          'key': 'a_plus',
+          'name': r'Asymmetry Parameter $a_+^*$',
+          'candidates': [2.0, 4.0, 8.0, 16.0],
+          'labels': ['2.0', '4.0', '8.0', '16.0'],
+      },
+      {
+          'ax': axes[1, 1],
+          'key': 'l',
+          'name': r'Leakage Factor $l^*$',
+          'candidates': [0.9375, 0.99375, 0.999375, 0.9999375],
+          'labels': ['0.9375\n(1-1/L)', '0.99375\n(1-0.1/L)', '0.999375\n(1-0.01/L)', '0.9999375\n(1-0.001/L)'],
+      },
+  ]
+
+  bar_width = 0.8 / n_groups
+
+  for cfg in configs:
+    ax = cfg['ax']
+    key = cfg['key']
+    cands = cfg['candidates']
+    x_indices = np.arange(len(cands))
+    max_count = 0
+
+    for g_idx, g in enumerate(groups):
+      g_records = [r for r in records if r[group_key] == g]
+      g_vals = [r[key] for r in g_records if not np.isnan(r[key])]
+      counts = [sum(np.isclose(v, c, rtol=1e-5, atol=1e-8) for v in g_vals) for c in cands]
+      max_count = max(max_count, max(counts) if counts else 0)
+
+      offset = (g_idx - (n_groups - 1) / 2) * bar_width
+      bars = ax.bar(
+          x_indices + offset,
+          counts,
+          width=bar_width,
+          color=group_colors[g],
+          edgecolor='black',
+          alpha=0.8,
+          label=f"{g} (n={len(g_records)})",
+      )
+
+      for bar, count in zip(bars, counts):
+        if count > 0:
+          ax.annotate(
+              f"{count}",
+              xy=(bar.get_x() + bar.get_width() / 2, count),
+              xytext=(0, 2),
+              textcoords="offset points",
+              ha='center',
+              va='bottom',
+              fontsize=8,
+          )
+
+    ax.set_xticks(x_indices)
+    ax.set_xticklabels(cfg['labels'], fontsize=9)
+    ax.set_ylabel("Frequency (Count)", fontweight='bold')
+    ax.set_title(cfg['name'], fontsize=11, fontweight='bold')
+    ax.set_ylim([0, max_count * 1.3 + 1])
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--')
+    ax.legend(fontsize=8, loc='upper right')
+
+  if title is None:
+    title = f"Optimal Hyperparameters Grouped by {group_key.replace('_', ' ').title()}"
+  fig.suptitle(f"{title} (N = {n_total} Experiments)", fontsize=13, fontweight='bold')
+  plt.tight_layout()
+  return fig
+
+
+def plot_optimal_metrics_histograms(
+    records: list[dict[str, Any]],
+    figsize: tuple[float, float] = (12, 4.5),
+) -> plt.Figure:
+  """Plot distributions of optimal convergence metric and optimal steady-state error.
+
+  Parameters
+  ----------
+  records : list of dict
+    List of dictionaries returned by collect_all_optimal_parameters.
+  figsize : tuple of float, optional
+    Figure dimensions (width, height).
+
+  Returns
+  -------
+  plt.Figure
+    The created matplotlib figure.
+  """
+  n_total = len(records)
+  conv_vals = [r['optimal_convergence_metric'] for r in records if not np.isnan(r['optimal_convergence_metric'])]
+  ss_vals = [r['optimal_steady_state_db'] for r in records if not np.isnan(r['optimal_steady_state_db'])]
+
+  fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+  # 1. Convergence metric
+  ax0 = axes[0]
+  if conv_vals:
+    ax0.hist(conv_vals, bins=12, color='steelblue', edgecolor='black', alpha=0.75)
+    mean_c = np.mean(conv_vals)
+    median_c = np.median(conv_vals)
+    ax0.axvline(mean_c, color='crimson', ls='--', lw=1.8, label=f"Mean: {mean_c:.1f}")
+    ax0.axvline(median_c, color='orange', ls=':', lw=1.8, label=f"Median: {median_c:.1f}")
+  ax0.set_xlabel("Optimal Convergence Metric (Accumulated Target Error)", fontweight='bold')
+  ax0.set_ylabel("Frequency (Count)", fontweight='bold')
+  ax0.set_title("Optimal Convergence Metric Distribution", fontsize=11, fontweight='bold')
+  ax0.grid(True, alpha=0.3, linestyle='--')
+  ax0.legend(fontsize=9)
+
+  # 2. Steady-state error
+  ax1 = axes[1]
+  if ss_vals:
+    ax1.hist(ss_vals, bins=12, color='seagreen', edgecolor='black', alpha=0.75)
+    mean_ss = np.mean(ss_vals)
+    median_ss = np.median(ss_vals)
+    ax1.axvline(mean_ss, color='crimson', ls='--', lw=1.8, label=f"Mean: {mean_ss:.2f} dB")
+    ax1.axvline(median_ss, color='orange', ls=':', lw=1.8, label=f"Median: {median_ss:.2f} dB")
+  ax1.set_xlabel("Optimal Steady-State MSD [dB]", fontweight='bold')
+  ax1.set_ylabel("Frequency (Count)", fontweight='bold')
+  ax1.set_title("Optimal Steady-State MSD Distribution", fontsize=11, fontweight='bold')
+  ax1.grid(True, alpha=0.3, linestyle='--')
+  ax1.legend(fontsize=9)
+
+  fig.suptitle(f"Optimal Outcome Metrics Distribution (N = {n_total} Experiments)", fontsize=12, fontweight='bold')
+  plt.tight_layout()
+  return fig
+
+
