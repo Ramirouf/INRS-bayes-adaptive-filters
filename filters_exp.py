@@ -2,7 +2,9 @@ import numpy as np
 import scipy.signal
 import dask
 import copy
+import functools
 import itertools
+import math
 
 from collections.abc import Callable
 import filters
@@ -1925,5 +1927,443 @@ def plot_optimal_metrics_histograms(
   fig.suptitle(f"Optimal Outcome Metrics Distribution (N = {n_total} Experiments)", fontsize=12, fontweight='bold')
   plt.tight_layout()
   return fig
+
+
+# Slow filter epsilon adjustment (bisection on the steady-state dB metric)
+
+SLOW_FILTER_SLOPE_TOLERANCE = 1e-6
+
+
+class SlowFilterSearchStop(Exception):
+  """Internal signal that ends a bisection search with a given status."""
+
+  def __init__(self, status: str, epsilon: float | None = None, evaluation: dict | None = None):
+    super().__init__(status)
+    self.status = status
+    self.epsilon = epsilon
+    self.evaluation = evaluation
+
+
+def load_yaml(path: str | Path) -> dict[str, Any]:
+  """Load a YAML file whose top level must be a mapping."""
+  with open(path, 'r') as f:
+    data = yaml.safe_load(f) or {}
+  if not isinstance(data, dict):
+    raise TypeError(f"YAML file must contain a mapping at its top level: {path}")
+  return data
+
+
+def _build_slow_filter_search_config(
+    algorithm_file: Path,
+    environment_file: Path,
+    input_file: Path,
+) -> dict[str, Any]:
+  """Build the simulation setup for one algorithm / environment / input combination."""
+  alg_cfg = load_yaml(algorithm_file)
+  env_cfg = load_yaml(environment_file)
+  input_cfg = load_yaml(input_file)
+
+  search_parameter = str(alg_cfg['search_parameter'])
+  raw_parameters = alg_cfg.get('parameters', {})
+  if search_parameter not in raw_parameters:
+    raise KeyError(f"Search parameter '{search_parameter}' is missing from {algorithm_file}")
+  bounds = _validate_numeric_array(raw_parameters[search_parameter], search_parameter)
+  if bounds.shape != (2,):
+    raise ValueError(f"'{search_parameter}' in {algorithm_file} must contain exactly two values [min, max].")
+  if not 0.0 < bounds[0] < bounds[1]:
+    raise ValueError(f"'{search_parameter}' bounds in {algorithm_file} must satisfy 0 < min < max.")
+  fixed_parameters = {
+      key: float(_validate_numeric(value, key))
+      for key, value in raw_parameters.items()
+      if key != search_parameter
+  }
+
+  algorithm_name = alg_cfg['algorithm']
+  if not hasattr(filters, algorithm_name):
+    raise AttributeError(f"Algorithm '{algorithm_name}' not found in filters module.")
+  parameter_class_name = alg_cfg['algorithm_parameter_class']
+  if not hasattr(filters, parameter_class_name):
+    raise AttributeError(f"Algorithm parameter class '{parameter_class_name}' not found in filters module.")
+  metric_name = alg_cfg.get('performance_metric', 'squared_deviation')
+  if not hasattr(metrics, metric_name):
+    raise AttributeError(f"Performance metric '{metric_name}' not found in metrics module.")
+
+  L = int(_validate_numeric(input_cfg['L'], 'L'))
+  plant_type = input_cfg.get('plant_type', 'normalized_sinc')
+  if plant_type != 'normalized_sinc':
+    raise ValueError(f"Unsupported plant_type '{plant_type}' in {input_file}; only 'normalized_sinc' is supported.")
+  ho = np.sinc(np.linspace(0, 1, L))
+  ho = ho / np.linalg.norm(ho)
+  AR = _validate_numeric_array(input_cfg['AR'], 'AR')
+  var_x = float(_validate_numeric(input_cfg['var_x'], 'var_x'))
+
+  behavior_name = env_cfg['behavior']
+  if not hasattr(filters, behavior_name):
+    raise AttributeError(f"Environment behavior '{behavior_name}' not found in filters module.")
+  env_class_name = env_cfg['parameters_class']
+  if not hasattr(filters, env_class_name):
+    raise AttributeError(f"Environment parameters class '{env_class_name}' not found in filters module.")
+  env_class = getattr(filters, env_class_name)
+  env_kwargs = {}
+  for field in env_class._fields:
+    if field == 'ho':
+      env_kwargs[field] = ho
+    elif field == 'AR':
+      env_kwargs[field] = AR
+    elif field == 'var_x':
+      env_kwargs[field] = var_x
+    elif field in env_cfg:
+      env_kwargs[field] = float(_validate_numeric(env_cfg[field], field))
+    else:
+      raise ValueError(f"Missing required field '{field}' in {environment_file}")
+
+  return {
+      'names': {
+          'algorithm': algorithm_file.stem,
+          'environment': environment_file.stem,
+          'input': input_file.stem,
+      },
+      'algorithm': getattr(filters, algorithm_name),
+      'algorithm_parameter_class': getattr(filters, parameter_class_name),
+      'fixed_parameters': fixed_parameters,
+      'search_parameter': search_parameter,
+      'search_bounds': (float(bounds[0]), float(bounds[1])),
+      'performance_metric': getattr(metrics, metric_name),
+      'environment': getattr(filters, behavior_name),
+      'environment_parameters': env_class(**env_kwargs),
+      'h0': np.zeros(L, dtype=np.float64),
+      'N': int(_validate_numeric(input_cfg['N'], 'N')),
+      'NR': int(_validate_numeric(input_cfg['NR'], 'NR')),
+      'num_workers': int(_validate_numeric(input_cfg.get('num_workers', 4), 'num_workers')),
+      'num_chunks': int(_validate_numeric(input_cfg.get('num_chunks', 8), 'num_chunks')),
+      'seed': int(_validate_numeric(input_cfg.get('seed', 42), 'seed')),
+  }
+
+
+def load_slow_filter_search_configs(config_dir: str | Path) -> list[dict[str, Any]]:
+  """Build one search configuration per algorithm x environment x input combination.
+
+  Expects the sub-folders 'algorithms', 'environments' and 'inputs' inside config_dir,
+  each containing one or more .yml files.
+  """
+  config_dir = Path(config_dir)
+  groups = {}
+  for group in ('algorithms', 'environments', 'inputs'):
+    files = sorted((config_dir / group).glob('*.yml'))
+    if not files:
+      raise FileNotFoundError(f"No .yml files found in {config_dir / group}")
+    groups[group] = files
+  return [
+      _build_slow_filter_search_config(algorithm_file, environment_file, input_file)
+      for algorithm_file, environment_file, input_file in itertools.product(
+          groups['algorithms'], groups['environments'], groups['inputs'])
+  ]
+
+
+def is_within_guard(epsilon: float, guard_bounds: tuple[float, float] = (1e-15, 1e2)) -> bool:
+  """Return True if epsilon is finite and lies inside the guard bounds."""
+  return bool(np.isfinite(epsilon) and guard_bounds[0] <= epsilon <= guard_bounds[1])
+
+
+def geometric_mean(a: float, b: float) -> float:
+  """Geometric mean of two positive values, computed in log scale."""
+  return float(np.exp(0.5 * (np.log(a) + np.log(b))))
+
+
+def evaluate_steady_state(epsilon: float, N: int, search_config: dict[str, Any]) -> dict[str, Any]:
+  """Simulate the slow filter at a given epsilon and measure its steady-state dB metric.
+
+  The steady-state value is the mean of the dB metric over the window with the lowest
+  absolute linear regression slope (find_minimum_linear_regression_slope). The run is
+  considered converged when that minimum slope is below SLOW_FILTER_SLOPE_TOLERANCE.
+  """
+  param_dict = dict(search_config['fixed_parameters'])
+  param_dict[search_config['search_parameter']] = float(epsilon)
+  param_dict['label'] = 'slow_filter'
+  param_obj = _build_algorithm_parameters(
+      algorithm=search_config['algorithm'],
+      param_dict=param_dict,
+      algorithm_parameter_class=search_config['algorithm_parameter_class'],
+  )
+
+  res, _ = mc.dask_MC_Simulations(
+      N=N,
+      NR=search_config['NR'],
+      environment_parameters=search_config['environment_parameters'],
+      environment=search_config['environment'],
+      algorithms=[search_config['algorithm']],
+      algorithms_parameters=[param_obj],
+      desired_metrics={'performance': search_config['performance_metric']},
+      h0=search_config['h0'],
+      num_workers=search_config['num_workers'],
+      num_chunks=search_config['num_chunks'],
+      seed=search_config['seed'],
+      scheduler='threads',
+  )
+
+  curve_db = default_db_scale(res['slow_filter']['performance'])
+  window_length = max(2, N // 10)
+  steady_state_db, window_start, diagnostics = find_minimum_linear_regression_slope(
+      curve_db, n_window_samples=window_length
+  )
+  min_slope = float(diagnostics['min_abs_slope'])
+  return {
+      'epsilon': float(epsilon),
+      'N': int(N),
+      'steady_state_db': float(steady_state_db),
+      'min_slope': min_slope,
+      'converged': bool(min_slope < SLOW_FILTER_SLOPE_TOLERANCE),
+      'window_start': int(window_start),
+      'window_length': int(window_length),
+      'window_slopes': diagnostics['abs_slopes'],
+      'curve_db': curve_db,
+  }
+
+
+def evaluate_with_iteration_growth(
+    epsilon: float,
+    phase: str,
+    *,
+    search_config: dict[str, Any],
+    target_db: float,
+    log: list[dict[str, Any]],
+    evaluations: list[dict[str, Any]],
+    iteration_start: int,
+    iteration_growth_rate: float,
+    iteration_cap: int,
+    tolerance_db: float,
+    guard_bounds: tuple[float, float],
+) -> dict[str, Any]:
+  """Simulate at epsilon, growing N until convergence or iteration_cap.
+
+  Every simulation is appended to log. Raises SlowFilterSearchStop for guard violations,
+  non-convergence, or when the steady-state value is already within tolerance_db of the target.
+  """
+  if not is_within_guard(epsilon, guard_bounds):
+    raise SlowFilterSearchStop('guard_violation', epsilon)
+  n_iter = iteration_start
+  while True:
+    ev = evaluate_steady_state(epsilon, n_iter, search_config)
+    log.append({
+        'phase': phase,
+        'epsilon': float(epsilon),
+        'N': int(n_iter),
+        'steady_state_db': ev['steady_state_db'],
+        'min_slope': ev['min_slope'],
+        'converged': ev['converged'],
+        'error_db': ev['steady_state_db'] - target_db,
+    })
+    if ev['converged'] or n_iter >= iteration_cap:
+      break
+    n_iter = min(math.ceil(n_iter * iteration_growth_rate), iteration_cap)
+  evaluations.append(ev)
+  if not ev['converged']:
+    raise SlowFilterSearchStop('not_converged', epsilon, ev)
+  if abs(ev['steady_state_db'] - target_db) <= tolerance_db:
+    raise SlowFilterSearchStop('converged', epsilon, ev)
+  return ev
+
+
+def expand_bracket(
+    eps_lo: float,
+    ev_lo: dict[str, Any],
+    eps_hi: float,
+    ev_hi: dict[str, Any],
+    target_db: float,
+    evaluate: Callable[[float, str], dict[str, Any]],
+) -> tuple[float, dict[str, Any], float, dict[str, Any]]:
+  """Expand the bracket until the target lies between its two ends.
+
+  evaluate(epsilon, phase) returns the evaluation at epsilon. Both ends below the target
+  moves the bracket up by x10; both ends above moves it down by x0.1.
+  """
+  while True:
+    lo_below = ev_lo['steady_state_db'] < target_db
+    hi_below = ev_hi['steady_state_db'] < target_db
+    if lo_below and hi_below:
+      eps_lo, ev_lo = eps_hi, ev_hi
+      eps_hi = eps_hi * 10.0
+      ev_hi = evaluate(eps_hi, 'bracket_expansion')
+    elif not lo_below and not hi_below:
+      eps_hi, ev_hi = eps_lo, ev_lo
+      eps_lo = eps_lo * 0.1
+      ev_lo = evaluate(eps_lo, 'bracket_expansion')
+    else:
+      return eps_lo, ev_lo, eps_hi, ev_hi
+
+
+def bisection_search_epsilon(
+    target_db: float,
+    search_config: dict[str, Any],
+    tolerance_db: float = 0.2,
+    guard_bounds: tuple[float, float] = (1e-15, 1e2),
+    iteration_growth_rate: float = 2.0,
+    iteration_cap: int = 1_000_000,
+    max_bisection_steps: int = 200,
+) -> dict[str, Any]:
+  """Find the epsilon whose steady-state dB metric equals target_db using bisection.
+
+  The steady-state dB metric is assumed to increase monotonically with epsilon. The
+  search bracket starts from search_config['search_bounds'] and is expanded by a factor
+  of 10 (upper end) or 0.1 (lower end) while both ends lie on the same side of the target.
+  Each new midpoint is the geometric mean of the bracket ends.
+
+  Each simulation starts at search_config['N'] and grows geometrically by iteration_growth_rate
+  (N -> ceil(N * rate), capped at iteration_cap) until it converges or reaches iteration_cap.
+
+  Returns a dict with the status ('converged', 'not_converged', 'guard_violation',
+  'bracket_exhausted' or 'max_bisection_steps'), the chosen epsilon, its steady-state
+  value, the full evaluation log and the evaluation used for the convergence figure.
+  """
+  n_init = int(search_config['N'])
+  if n_init > iteration_cap:
+    raise ValueError(f"Initial N ({n_init}) exceeds iteration_cap ({iteration_cap}).")
+  if iteration_growth_rate <= 1:
+    raise ValueError("iteration_growth_rate must be greater than 1.")
+
+  search_min, search_max = search_config['search_bounds']
+  log: list[dict[str, Any]] = []
+  evaluations: list[dict[str, Any]] = []
+
+  status = 'max_bisection_steps'
+  evaluate = functools.partial(
+      evaluate_with_iteration_growth,
+      search_config=search_config,
+      target_db=target_db,
+      log=log,
+      evaluations=evaluations,
+      iteration_start=n_init,
+      iteration_growth_rate=iteration_growth_rate,
+      iteration_cap=iteration_cap,
+      tolerance_db=tolerance_db,
+      guard_bounds=guard_bounds,
+  )
+  try:
+    eps_lo = search_min
+    ev_lo = evaluate(eps_lo, 'bracket')
+    eps_hi = search_max
+    ev_hi = evaluate(eps_hi, 'bracket')
+    eps_lo, ev_lo, eps_hi, ev_hi = expand_bracket(eps_lo, ev_lo, eps_hi, ev_hi, target_db, evaluate)
+
+    for _ in range(max_bisection_steps):
+      mid = geometric_mean(eps_lo, eps_hi)
+      if not eps_lo < mid < eps_hi:
+        raise SlowFilterSearchStop('bracket_exhausted')
+      ev_mid = evaluate(mid, 'bisection')
+      if ev_mid['steady_state_db'] < target_db:
+        eps_lo, ev_lo = mid, ev_mid
+      else:
+        eps_hi, ev_hi = mid, ev_mid
+    raise SlowFilterSearchStop('max_bisection_steps')
+  except SlowFilterSearchStop as stop:
+    status = stop.status
+    chosen_ev = stop.evaluation
+    if chosen_ev is None and evaluations:
+      chosen_ev = min(evaluations, key=lambda e: abs(e['steady_state_db'] - target_db))
+
+  return {
+      'status': status,
+      'target_db': float(target_db),
+      'tolerance_db': float(tolerance_db),
+      'epsilon': chosen_ev['epsilon'] if chosen_ev else None,
+      'steady_state_db': chosen_ev['steady_state_db'] if chosen_ev else None,
+      'N': chosen_ev['N'] if chosen_ev else None,
+      'converged': chosen_ev['converged'] if chosen_ev else False,
+      'search_bounds': [float(search_min), float(search_max)],
+      'guard_bounds': [float(guard_bounds[0]), float(guard_bounds[1])],
+      'iteration_start': n_init,
+      'iteration_growth_rate': float(iteration_growth_rate),
+      'iteration_cap': int(iteration_cap),
+      'log': log,
+      'evaluation': chosen_ev,
+  }
+
+
+def plot_epsilon_convergence(result: dict[str, Any], output_path: str | Path) -> Path | None:
+  """Plot the steady-state convergence curve of the chosen epsilon with its slope window.
+
+  Returns None (and writes nothing) when no evaluation is available.
+  """
+  ev = result.get('evaluation')
+  if ev is None:
+    return None
+  output_path = Path(output_path)
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+
+  start = ev['window_start']
+  end = start + ev['window_length']
+  fig, (ax_curve, ax_slope) = plt.subplots(2, 1, figsize=(7, 7))
+
+  ax_curve.plot(np.arange(len(ev['curve_db'])), ev['curve_db'], lw=0.6, label='MSD (dB)')
+  ax_curve.axvspan(start, end, color='orange', alpha=0.3, label='lowest-slope window')
+  ax_curve.axhline(result['target_db'], color='red', ls='--', label=f"target {result['target_db']:g} dB")
+  ax_curve.axhline(ev['steady_state_db'], color='black', ls=':', label='steady-state (window mean)')
+  ax_curve.set_xlabel('Iteration')
+  ax_curve.set_ylabel('MSD (dB)')
+  ax_curve.set_title(
+      f"epsilon = {ev['epsilon']:.4e}, N = {ev['N']}, status = {result['status']}"
+  )
+  ax_curve.legend(fontsize=8)
+
+  ax_slope.plot(np.arange(len(ev['window_slopes'])), np.maximum(ev['window_slopes'], 1e-12),
+                lw=0.8, label='mean |slope| per window')
+  ax_slope.axhline(SLOW_FILTER_SLOPE_TOLERANCE, color='red', ls='--',
+                   label=f'slope tolerance ({SLOW_FILTER_SLOPE_TOLERANCE:g})')
+  ax_slope.axvline(start, color='orange', label='selected window start')
+  ax_slope.set_yscale('log')
+  ax_slope.set_xlabel('Window start (iteration)')
+  ax_slope.set_ylabel('Mean |dB slope| (dB/sample)')
+  ax_slope.set_title(f"min slope = {ev['min_slope']:.3e} dB/sample, window = {ev['window_length']} samples")
+  ax_slope.legend(fontsize=8)
+
+  fig.tight_layout()
+  fig.savefig(output_path, format='pdf', bbox_inches='tight')
+  plt.close(fig)
+  return output_path
+
+
+def save_search_results(result: dict[str, Any], search_config: dict[str, Any], output_dir: str | Path) -> tuple[Path, Path]:
+  """Write optimal_epsilon.yml (values) and summary.yml (simulation summary and bisection log)."""
+  output_dir = Path(output_dir)
+  output_dir.mkdir(parents=True, exist_ok=True)
+
+  optimal = {
+      'algorithm': search_config['names']['algorithm'],
+      'environment': search_config['names']['environment'],
+      'input': search_config['names']['input'],
+      'target_db': result['target_db'],
+      'search_parameter': search_config['search_parameter'],
+      'optimal_value': result['epsilon'],
+      'steady_state_db': result['steady_state_db'],
+      'N': result['N'],
+      'converged': result['converged'],
+      'status': result['status'],
+  }
+  summary = {
+      'algorithm': search_config['names']['algorithm'],
+      'environment': search_config['names']['environment'],
+      'input': search_config['names']['input'],
+      'target_db': result['target_db'],
+      'status': result['status'],
+      'tolerance_db': result['tolerance_db'],
+      'search_parameter': search_config['search_parameter'],
+      'search_bounds': result['search_bounds'],
+      'guard_bounds': result['guard_bounds'],
+      'fixed_parameters': search_config['fixed_parameters'],
+      'NR': search_config['NR'],
+      'iteration_start': result['iteration_start'],
+      'iteration_growth_rate': result['iteration_growth_rate'],
+      'iteration_cap': result['iteration_cap'],
+      'number_of_simulations': len(result['log']),
+      'log': result['log'],
+  }
+
+  optimal_path = output_dir / 'optimal_epsilon.yml'
+  summary_path = output_dir / 'summary.yml'
+  with open(optimal_path, 'w') as f:
+    yaml.safe_dump(optimal, f, sort_keys=False)
+  with open(summary_path, 'w') as f:
+    yaml.safe_dump(summary, f, sort_keys=False)
+  return optimal_path, summary_path
 
 

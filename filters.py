@@ -79,6 +79,7 @@ filter_output = namedtuple('filter_output', ['y', 'e', 'h', 'v'])
 std_env_parameters = namedtuple('std_env_parameters', ['ho', 'AR','var_v','var_x'])
 sys_inversion_gaussian_env_parameters = namedtuple('sys_inversion_gaussian_env_parameters', ['ho', 'AR', 'var_v', 'var_x'])
 laplace_env_parameters = namedtuple('laplace_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
+std_general_gaussian_env_parameters = namedtuple('std_general_gaussian_env_parameters', ['ho', 'AR', 'beta', 'scale_v', 'var_x'])
 sys_inversion_general_gaussian_env_parameters = namedtuple('sys_inversion_general_gaussian_env_parameters', ['ho', 'AR', 'beta', 'scale_v', 'var_x'])
 sys_inversion_laplacian_env_parameters = namedtuple('sys_inversion_laplacian_env_parameters', ['ho', 'AR', 'scale_v', 'var_x'])
 sys_inversion_impulsive_gaussian_env_parameters = namedtuple('sys_inversion_impulsive_gaussian_env_parameters', ['ho', 'AR', 'p', 'var_1', 'var_2', 'var_x'])
@@ -1288,6 +1289,25 @@ def impulsive_gaussian(shape: tuple[int], p:np.float64, var_1:np.float64=1.0, va
     else:
       flat[i] = np.random.normal(0, np.sqrt(var_2))
   return out
+
+@njit(cache=True, nogil=True)
+def std_general_gaussian_behavior(N: int,
+                                  params: std_general_gaussian_env_parameters,
+                                  warm_up: bool = True):
+    # AR process order and filter length
+    L = len(params.ho)
+
+    # Determine the noise signal
+    v = generalized_gaussian(shape=(N,), beta=params.beta, scale=params.scale_v)
+
+    # Determine the input signal x through a AR process
+    x = _generate_normal_input_signal(N + L, params.AR, warm_up = warm_up, var_x = params.var_x)
+    
+    # Determine the desired signal
+    d = v + np.convolve(params.ho, x, mode = 'full')[L:N+L]
+    x = x[L:N+L]
+
+    return params.ho, {'x': x, 'v': v, 'd': d}
 
 @njit(cache=True, nogil=True)
 def sys_inversion_general_gaussian_behavior(N: int,
