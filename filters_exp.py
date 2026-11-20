@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.signal
 import dask
 import copy
 import itertools
@@ -165,6 +166,94 @@ def find_minimum_lowest_slope(
       'best_window_center': best_idx + n_slope_samples // 2,
       'min_slope': float(window_slopes[best_idx]),
       'n_slope_samples': n_slope_samples,
+  }
+  return target_val, best_idx, diagnostics
+
+
+def find_minimum_linear_regression_slope(
+    db_metric: np.typing.NDArray[np.float64],
+    n_window_samples: int | None = None,
+) -> tuple[float, int, dict[str, Any]]:
+  """Find the minimum/floor of a dB metric array by locating the window with lowest absolute linear regression slope.
+
+  Parameters
+  ----------
+  db_metric : NDArray[np.float64]
+    Array of metric values in dB.
+  n_window_samples : int, optional
+    Window size in samples. If None, defaults to max(2, len(db_metric) // 10).
+
+  Returns
+  -------
+  target_val : float
+    Mean metric value in the window with the lowest absolute linear regression slope.
+  best_window_start : int
+    Start index of the window with the lowest absolute slope.
+  diagnostics : dict[str, Any]
+    Diagnostic information including slopes, regression line parameters, and window bounds.
+  """
+  n_total = len(db_metric)
+  if n_window_samples is None:
+    n_window_samples = max(2, n_total // 10)
+  else:
+    n_window_samples = int(n_window_samples)
+
+  if n_total < n_window_samples:
+    raise ValueError(
+        f"Input array length ({n_total}) must be >= n_window_samples ({n_window_samples})."
+    )
+
+  W = n_window_samples
+  k = np.arange(W, dtype=np.float64)
+  k_bar = (W - 1.0) / 2.0
+  # Denominator sum_{k=0}^{W-1} (k - k_bar)^2 = W * (W^2 - 1) / 12
+  denominator = W * (W**2 - 1.0) / 12.0
+  kernel = (k - k_bar) / denominator
+
+  # Compute OLS slope m_i for each sliding window via FFT convolution:
+  # m_i = sum_{k=0}^{W-1} db_metric[i + k] * kernel[k]
+  slopes = scipy.signal.fftconvolve(db_metric, kernel[::-1], mode='valid')
+  abs_slopes = np.abs(slopes)
+
+  # Compute local mean of each sliding window:
+  window_means = scipy.signal.fftconvolve(db_metric, np.ones(W, dtype=np.float64) / W, mode='valid')
+
+  # To guarantee the minimum/floor is found rather than a peak/local maximum,
+  # restrict candidate windows to those whose mean is below or equal to the median window mean:
+  median_level = float(np.median(window_means))
+  valid_candidates = np.where(window_means <= median_level)[0]
+  if len(valid_candidates) == 0:
+    valid_candidates = np.arange(len(abs_slopes))
+
+  best_idx = int(valid_candidates[np.nanargmin(abs_slopes[valid_candidates])])
+  best_window_vals = db_metric[best_idx : best_idx + W]
+  target_val = float(np.mean(best_window_vals))
+  best_slope = float(slopes[best_idx])
+
+  # Regression line across the best window:
+  # y_hat(x) = best_slope * (x - x_center) + target_val
+  x_start = best_idx
+  x_end = best_idx + W - 1
+  x_center = best_idx + (W - 1.0) / 2.0
+  y_start = float(target_val - best_slope * (W - 1.0) / 2.0)
+  y_end = float(target_val + best_slope * (W - 1.0) / 2.0)
+
+  full_x = np.arange(x_start, best_idx + W, dtype=np.float64)
+  full_y = target_val + best_slope * (full_x - x_center)
+
+  diagnostics = {
+      'slopes': slopes,
+      'abs_slopes': abs_slopes,
+      'best_window_start': best_idx,
+      'best_window_end': best_idx + W,
+      'best_window_center': int(round(x_center)),
+      'best_slope': best_slope,
+      'min_abs_slope': float(abs_slopes[best_idx]),
+      'n_window_samples': W,
+      'regression_line_x': np.array([float(x_start), float(x_end)], dtype=np.float64),
+      'regression_line_y': np.array([y_start, y_end], dtype=np.float64),
+      'regression_line_full_x': full_x,
+      'regression_line_full_y': full_y,
   }
   return target_val, best_idx, diagnostics
 
@@ -419,13 +508,20 @@ def grid_search(
   else:
     convergence_metric_parameters = dict(convergence_metric_parameters)
 
-  n_slope_samples = int(convergence_metric_parameters.get('n_slope_samples', 1000))
+  n_window_samples = convergence_metric_parameters.get('n_window_samples')
+  if n_window_samples is None:
+    if 'n_slope_samples' in convergence_metric_parameters and convergence_metric_parameters['n_slope_samples'] != 1000:
+      n_window_samples = int(convergence_metric_parameters['n_slope_samples'])
+    else:
+      n_window_samples = max(2, N // 10)
+  else:
+    n_window_samples = int(n_window_samples)
 
   if slow_label is not None and slow_label in res:
     slow_perf = res[slow_label]['performance']
     slow_curve = performance_metric_scale(slow_perf)
-    slow_min, slow_min_idx, slow_diag = find_minimum_lowest_slope(
-        slow_curve, n_slope_samples=n_slope_samples
+    slow_min, slow_min_idx, slow_diag = find_minimum_linear_regression_slope(
+        slow_curve, n_window_samples=n_window_samples
     )
 
   is_target_error = (
@@ -443,8 +539,7 @@ def grid_search(
         )
     if 'tolerance' not in convergence_metric_parameters or convergence_metric_parameters['tolerance'] is None:
       convergence_metric_parameters['tolerance'] = 0.2
-    if 'n_slope_samples' not in convergence_metric_parameters:
-      convergence_metric_parameters['n_slope_samples'] = n_slope_samples
+    convergence_metric_parameters['n_window_samples'] = n_window_samples
 
   convergence_grid = np.full(grid_shape, np.nan, dtype=np.float64)
   steady_state_grid = np.full(grid_shape, np.nan, dtype=np.float64)
@@ -517,7 +612,7 @@ def grid_search(
       'convergence_metric_name': getattr(convergence_metric, '__name__', str(convergence_metric)),
       'convergence_metric_target': convergence_metric_parameters.get('target'),
       'convergence_metric_tolerance': convergence_metric_parameters.get('tolerance'),
-      'n_slope_samples': n_slope_samples,
+      'n_window_samples': n_window_samples,
   }
 
 
@@ -1057,15 +1152,18 @@ def load_experiment_configs(folder_path: str | Path) -> dict[str, Any]:
   convergence_metric_parameters = {}
   for k, v in conv_params_raw.items():
     if v is not None:
-      if k == 'n_slope_samples':
+      if k in ('n_window_samples', 'n_slope_samples'):
         convergence_metric_parameters[k] = int(_validate_numeric(v, k))
       else:
         convergence_metric_parameters[k] = float(_validate_numeric(v, k))
   if conv_metric_name == 'db_accumulated_target_error':
     if 'tolerance' not in convergence_metric_parameters:
       convergence_metric_parameters['tolerance'] = 0.2
-    if 'n_slope_samples' not in convergence_metric_parameters:
-      convergence_metric_parameters['n_slope_samples'] = 1000
+    if 'n_window_samples' not in convergence_metric_parameters:
+      if 'n_slope_samples' in convergence_metric_parameters and convergence_metric_parameters['n_slope_samples'] != 1000:
+        convergence_metric_parameters['n_window_samples'] = convergence_metric_parameters['n_slope_samples']
+      else:
+        convergence_metric_parameters['n_window_samples'] = max(2, N // 10)
 
   floor_estimate_samples = int(
       _validate_numeric(alg_cfg.get('floor_estimate_samples', 100), 'floor_estimate_samples')
@@ -1292,6 +1390,19 @@ def plot_grid_search_learning_curves(
     ax.axhline(target_val, color='gray', ls=':', lw=1.2, alpha=0.8, label=f"Target ({target_val:.2f} dB)")
     ax.axhspan(target_val - tol_val, target_val + tol_val, color='gray', alpha=0.15, label=f"Tolerance (±{tol_val:.2f} dB)")
 
+    slow_diag = grid_results.get('slow_baseline_diagnostics')
+    if slow_diag is not None and 'regression_line_full_x' in slow_diag:
+      reg_slope = slow_diag.get('best_slope', 0.0)
+      ax.plot(
+          slow_diag['regression_line_full_x'],
+          slow_diag['regression_line_full_y'],
+          color='black',
+          lw=2.2,
+          ls='-',
+          zorder=5,
+          label=f"Slow Reg. Line (slope={reg_slope:.1e})",
+      )
+
   ax.set_xlabel("Iteration", fontsize=11)
   ax.set_ylabel("Normalized MSD [dB]", fontsize=11)
   ax.set_title("MSD Learning Curves: Optimal vs. Worst, Median & Baselines", fontsize=13)
@@ -1385,15 +1496,17 @@ def run_grid_search_experiment(
     valid_deriv = deriv_grid[np.isfinite(deriv_grid)] if deriv_grid.size > 0 else np.array([])
     total_combos = int(np.prod(c_grid.shape))
 
+    diag = grid_results.get('slow_baseline_diagnostics') or {}
     summary_dict = {
         'computation_time_seconds': float(round(t_elapsed, 2)),
         'total_combinations': total_combos,
         'convergence_metric_name': grid_results.get('convergence_metric_name'),
         'convergence_metric_target': float(grid_results['convergence_metric_target']) if grid_results.get('convergence_metric_target') is not None else None,
         'convergence_metric_tolerance': float(grid_results['convergence_metric_tolerance']) if grid_results.get('convergence_metric_tolerance') is not None else None,
-        'n_slope_samples': int(grid_results['n_slope_samples']) if grid_results.get('n_slope_samples') is not None else 1000,
+        'n_window_samples': int(grid_results['n_window_samples']) if grid_results.get('n_window_samples') is not None else int(cfg['N'] // 10),
         'slow_baseline_min_db': float(grid_results['slow_baseline_min']) if grid_results.get('slow_baseline_min') is not None else None,
-        'slow_baseline_min_slope': float(grid_results['slow_baseline_diagnostics']['min_slope']) if grid_results.get('slow_baseline_diagnostics') and 'min_slope' in grid_results['slow_baseline_diagnostics'] else None,
+        'slow_baseline_slope': float(diag['best_slope']) if 'best_slope' in diag else None,
+        'slow_baseline_window_center': int(diag['best_window_center']) if 'best_window_center' in diag else None,
         'optimal_convergence_metric': float(grid_results['best_metric_value']),
         'mean_convergence_metric': float(np.mean(valid_conv)) if len(valid_conv) > 0 else None,
         'std_convergence_metric': float(np.std(valid_conv)) if len(valid_conv) > 0 else None,

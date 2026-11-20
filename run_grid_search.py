@@ -122,7 +122,11 @@ def run_single_experiment(experiment_dir: Path) -> None:
     print(f"  {k}*: {v}")
   if results.get('convergence_metric_target') is not None:
     print(f"Convergence Metric: {results.get('convergence_metric_name', 'db_accumulated_target_error')}")
-    print(f"  Target: {results['convergence_metric_target']:.2f} dB (Lowest-Slope Window Mean, Slow Baseline: {results.get('slow_baseline_min', 0.0):.2f} dB)")
+    slow_diag = results.get('slow_baseline_diagnostics') or {}
+    slope_str = f", Slope: {slow_diag.get('best_slope', 0.0):.2e}" if 'best_slope' in slow_diag else ""
+    center_str = f", Center: {slow_diag.get('best_window_center', 0)}" if 'best_window_center' in slow_diag else ""
+    w_str = f"W={results.get('n_window_samples', 'N/10')}"
+    print(f"  Target: {results['convergence_metric_target']:.2f} dB (Linear Regression Window Mean, {w_str}{slope_str}{center_str})")
     print(f"  Tolerance: ±{results.get('convergence_metric_tolerance', 0.2):.2f} dB")
   print(f"Best Convergence Metric Value: {results['best_metric_value']:.2f}")
   print(f"Steady-State MSD at Optimal: {results['best_steady_state']:.2f} dB")
