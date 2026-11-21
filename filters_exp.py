@@ -51,6 +51,7 @@ def db_accumulated_target_error(
     db_metric: np.typing.NDArray[np.float64],
     target: float | np.floating,
     tolerance: float | np.floating = 0.2,
+    normalize: bool = True,
     **kwargs: Any,
 ) -> float:
   """Compute the accumulated target error of the given dB metric.
@@ -63,6 +64,8 @@ def db_accumulated_target_error(
     Target value in dB (e.g. minimum value of the slow filter).
   tolerance : float, optional
     Tolerance around the target in dB (default: 0.2 dB).
+  normalize : bool, optional
+    Whether to normalize the accumulated error by the area of the initial deviation from the target (default: True).
   **kwargs : Any
     Additional keyword arguments (ignored, for interface compatibility).
 
@@ -72,6 +75,9 @@ def db_accumulated_target_error(
     Accumulated target error.
   """
   error = np.maximum(np.abs(db_metric - target) - tolerance, 0.0)
+  if normalize:
+    normalization_factor = np.abs(db_metric[0] - target)*len(db_metric)
+    return float(np.sum(error) / normalization_factor)
   return float(np.sum(error))
 
 def time_to_convergence(db_metric: np.typing.NDArray[np.float64],

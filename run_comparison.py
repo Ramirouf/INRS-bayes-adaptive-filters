@@ -443,7 +443,7 @@ def run_comparison_leaf(leaf_dir: str | Path) -> dict[str, Any]:
   t_elapsed = time.time() - t_start
   print(f"Monte Carlo simulations completed in {t_elapsed:.2f} seconds.")
 
-  # Compute overall convergence area and steady-state metrics
+  # Compute accumulated target error and steady-state metrics
   metrics_summary: dict[str, Any] = {
       "leaf_directory": str(leaf),
       "computation_time_seconds": float(t_elapsed),
@@ -462,9 +462,13 @@ def run_comparison_leaf(leaf_dir: str | Path) -> dict[str, Any]:
     msd_db = 10.0 * np.log10(np.maximum(msd_raw, 1e-15))
     emse_db = 10.0 * np.log10(np.maximum(emse_raw, 1e-15))
 
-    # Overall convergence area: sum(dB - min(dB))
-    msd_conv_area = float(exp.db_area_of_convergence(msd_db))
-    emse_conv_area = float(exp.db_area_of_convergence(emse_db))
+    # Calculate target values using minimum linear regression slope
+    msd_target, _, _ = exp.find_minimum_linear_regression_slope(msd_db, n_window_samples=None)
+    emse_target, _, _ = exp.find_minimum_linear_regression_slope(emse_db, n_window_samples=None)
+
+    # Accumulated target error
+    msd_ate = float(exp.db_accumulated_target_error(msd_db, target=msd_target, tolerance=0.2, normalize=True))
+    emse_ate = float(exp.db_accumulated_target_error(emse_db, target=emse_target, tolerance=0.2, normalize=True))
 
     # Steady-state floor (mean of last floor_estimate_samples)
     msd_ss_db = float(np.mean(msd_db[-floor_estimate_samples:]))
@@ -480,12 +484,14 @@ def run_comparison_leaf(leaf_dir: str | Path) -> dict[str, Any]:
 
     metrics_summary["algorithms"][label] = {
         "msd": {
-            "convergence_area": msd_conv_area,
+            "accumulated_target_error": msd_ate,
+            "target_db": msd_target,
             "steady_state_db": msd_ss_db,
             "steady_state_derivative": msd_ss_deriv,
         },
         "emse": {
-            "convergence_area": emse_conv_area,
+            "accumulated_target_error": emse_ate,
+            "target_db": emse_target,
             "steady_state_db": emse_ss_db,
             "steady_state_derivative": emse_ss_deriv,
         },
@@ -537,12 +543,12 @@ def run_comparison_leaf(leaf_dir: str | Path) -> dict[str, Any]:
   for label in cfg["algorithm_labels"]:
     msd_raw = np.asarray(measures[label]["MSD"], dtype=np.float64)
     msd_db = 10.0 * np.log10(np.maximum(msd_raw, 1e-15))
-    conv_area = metrics_summary["algorithms"][label]["msd"]["convergence_area"]
+    msd_ate = metrics_summary["algorithms"][label]["msd"]["accumulated_target_error"]
 
     if label == "GISV-sKF":
       plot_label = label
     else:
-      plot_label = f"{label} (Area = {conv_area:.1f})"
+      plot_label = f"{label} (ATE = {msd_ate:.2e})"
 
     st = style_map.get(label, {"color": None, "linestyle": "-", "label": label})
     ax_msd.plot(iterations, msd_db, color=st["color"], linestyle=st["linestyle"], label=plot_label, linewidth=1.5)
@@ -561,12 +567,12 @@ def run_comparison_leaf(leaf_dir: str | Path) -> dict[str, Any]:
   for label in cfg["algorithm_labels"]:
     emse_raw = np.asarray(measures[label]["EMSE"], dtype=np.float64)
     emse_db = 10.0 * np.log10(np.maximum(emse_raw, 1e-15))
-    conv_area = metrics_summary["algorithms"][label]["emse"]["convergence_area"]
+    emse_ate = metrics_summary["algorithms"][label]["emse"]["accumulated_target_error"]
 
     if label == "GISV-sKF":
       plot_label = label
     else:
-      plot_label = f"{label} (Area = {conv_area:.1f})"
+      plot_label = f"{label} (ATE = {emse_ate:.2e})"
 
     st = style_map.get(label, {"color": None, "linestyle": "-", "label": label})
     ax_emse.plot(iterations, emse_db, color=st["color"], linestyle=st["linestyle"], label=plot_label, linewidth=1.5)

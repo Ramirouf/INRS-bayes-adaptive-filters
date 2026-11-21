@@ -14,7 +14,7 @@ GRID_FOLDER_BY_ALGORITHM = {
     "sKF_algorithm": "skf_combination",
     "sKF_L_algorithm": "skf_l_combination",
 }
-N_GRID_FACTOR = 2
+N_GRID_FACTOR = 4
 GRID_EPSILON_KEY = "epsilon_2"
 ENVIRONMENT_KEYS_NOT_COPIED = ("behavior", "parameters_class")
 
