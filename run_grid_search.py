@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 import filters_exp as exp
 
@@ -45,6 +46,11 @@ def parse_args() -> argparse.Namespace:
       "--all",
       action="store_true",
       help="Scan all leaf subfolders of 'experiments/grid_searches' and run all experiments.",
+  )
+  parser.add_argument(
+      "--resume",
+      action="store_true",
+      help="When running with --all, skip experiments that have already completed with the configured number of combinations.",
   )
   return parser.parse_args()
 
@@ -90,6 +96,25 @@ def validate_all_experiments(experiment_dirs: list[Path]) -> None:
     # load_experiment_configs raises FileNotFoundError or TypeError/ValueError if invalid
     exp.load_experiment_configs(exp_dir)
   print("✓ All configuration files successfully validated.\n")
+
+
+def is_experiment_completed(experiment_dir: Path) -> bool:
+  """Check if an experiment has already completed with the configured number of combinations."""
+  summary_file = experiment_dir / "grid_search_summary.yml"
+  alg_file = experiment_dir / "algorithm_config.yml"
+  if not summary_file.is_file() or not alg_file.is_file():
+    return False
+  try:
+    with open(summary_file, "r") as f:
+      summary = yaml.safe_load(f) or {}
+    with open(alg_file, "r") as f:
+      alg_cfg = yaml.safe_load(f) or {}
+    done_combos = summary.get("total_combinations")
+    conv_params = alg_cfg.get("convergence_parameters", {})
+    expected_combos = int(np.prod([len(v) for v in conv_params.values()]))
+    return done_combos == expected_combos
+  except Exception:
+    return False
 
 
 def run_single_experiment(experiment_dir: Path) -> None:
@@ -174,15 +199,35 @@ def main() -> None:
     # Pre-validate all configuration files; aborts immediately if any file is invalid
     validate_all_experiments(leaf_experiments)
 
-    # Run all experiments
-    t_all_start = time.time()
+    # Filter experiments if resuming
+    pending_experiments = []
     for exp_dir in leaf_experiments:
+      if args.resume and is_experiment_completed(exp_dir):
+        print(f"Skipping already completed experiment: {exp_dir.relative_to(grid_searches_root)}")
+      else:
+        pending_experiments.append(exp_dir)
+
+    print(f"\nRunning {len(pending_experiments)} of {len(leaf_experiments)} experiments.\n")
+
+    # Run pending experiments
+    t_all_start = time.time()
+    for exp_dir in pending_experiments:
       run_single_experiment(exp_dir)
     t_all_elapsed = time.time() - t_all_start
 
     print(f"\n{'=' * 70}")
-    print(f"All {len(leaf_experiments)} experiments completed successfully in {t_all_elapsed:.2f} seconds.")
+    print(f"Batch completed: {len(pending_experiments)} experiments processed in {t_all_elapsed:.2f} seconds.")
     print(f"{'=' * 70}\n")
+
+    summary_script = Path("experiments/grid_search_summary/gs_summary.py")
+    if summary_script.is_file():
+      print("Updating cross-experiment summary figures via gs_summary.py...")
+      try:
+        import subprocess
+        subprocess.run([sys.executable, str(summary_script)], check=True)
+        print("Summary figures updated successfully.\n")
+      except Exception as err:
+        print(f"Warning: Could not run gs_summary.py: {err}\n")
 
 
 if __name__ == "__main__":
