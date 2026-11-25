@@ -14,6 +14,7 @@ across standardized noise environments, floor targets, and input characteristics
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import os
 import sys
@@ -111,6 +112,195 @@ def _validate_numeric_array(val: Any, param_name: str) -> np.ndarray:
   return np.asarray(val, dtype=np.float64)
 
 
+def extract_experiment_axes(leaf_dir: str | Path) -> tuple[str, str, str]:
+  """Extract (environment, target_msd, input_characteristic) from a leaf directory path."""
+  leaf = Path(leaf_dir).resolve()
+  parts = leaf.parts
+  if len(parts) < 3:
+    raise ValueError(f"Leaf directory path '{leaf_dir}' is too short to determine experiment axes.")
+  env, target, inp = parts[-3], parts[-2], parts[-1]
+  valid_envs = {"gaussian", "laplacian", "heavy_tail"}
+  valid_targets = {"-30dB", "-40dB", "-50dB"}
+  valid_inputs = {"white_input", "correlated_input"}
+  if env not in valid_envs or target not in valid_targets or inp not in valid_inputs:
+    raise ValueError(
+        f"Directory '{leaf_dir}' does not match expected structure: "
+        f"<environment>/{valid_envs}/<target_msd>/{valid_targets}/<input_characteristic>/{valid_inputs}. "
+        f"Parsed: env='{env}', target='{target}', input='{inp}'."
+    )
+  return env, target, inp
+
+
+def resolve_leaf_dir(
+    leaf_dir: str | Path,
+    comparisons_root: str | Path = "experiments/comparisons/gisv_vs_combinations",
+) -> Path:
+  """Resolve a user-provided leaf directory to an absolute Path under comparisons_root."""
+  path = Path(leaf_dir)
+  if path.is_dir():
+    return path.resolve()
+  comp_root = Path(comparisons_root).resolve()
+  candidate = comp_root / leaf_dir
+  if candidate.is_dir() or len(Path(leaf_dir).parts) == 3:
+    return candidate.resolve()
+  try:
+    env, target, inp = extract_experiment_axes(path)
+    return (comp_root / env / target / inp).resolve()
+  except Exception:
+    pass
+  return path.resolve()
+
+
+def update_leaf_from_grid_searches(
+    leaf_dir: str | Path,
+    grid_searches_root: str | Path = "experiments/grid_searches",
+) -> Path:
+  """Load optimal parameters and appropriate sample size N from grid searches and write comparison configs."""
+  leaf_dir = Path(leaf_dir).resolve()
+  grid_root = Path(grid_searches_root).resolve()
+
+  env, target, inp = extract_experiment_axes(leaf_dir)
+
+  skf_comb_dir = grid_root / "skf_combination" / env / target / inp
+  skf_l_comb_dir = grid_root / "skf_l_combination" / env / target / inp
+
+  skf_comb_opt_file = skf_comb_dir / "optimal_parameters.yml"
+  skf_l_comb_opt_file = skf_l_comb_dir / "optimal_parameters.yml"
+  skf_env_file = skf_comb_dir / "environment_config.yml"
+  skf_l_env_file = skf_l_comb_dir / "environment_config.yml"
+
+  for fpath in (skf_comb_opt_file, skf_l_comb_opt_file, skf_env_file, skf_l_env_file):
+    if not fpath.is_file():
+      raise FileNotFoundError(f"Required grid search file not found: {fpath}")
+
+  leaf_dir.mkdir(parents=True, exist_ok=True)
+
+  with open(skf_env_file, "r") as f:
+    skf_env_cfg = yaml.safe_load(f) or {}
+  with open(skf_l_env_file, "r") as f:
+    skf_l_env_cfg = yaml.safe_load(f) or {}
+
+  # Load appropriate number of samples N across grid search experiments
+  skf_N = int(_validate_numeric(skf_env_cfg.get("N", 20000), "skf_combination:N"))
+  skf_l_N = int(_validate_numeric(skf_l_env_cfg.get("N", 20000), "skf_l_combination:N"))
+  N = max(skf_N, skf_l_N)
+
+  # Choose environment config base (prefer the one with larger N for worker/chunk tuning)
+  base_env_cfg = copy.deepcopy(skf_l_env_cfg if skf_l_N >= skf_N else skf_env_cfg)
+  base_env_cfg["N"] = N
+
+  # Memory safety for very large N simulations (e.g. N = 640000)
+  if N >= 640000:
+    base_env_cfg["num_workers"] = min(int(base_env_cfg.get("num_workers", 2)), 2)
+    base_env_cfg["num_chunks"] = min(int(base_env_cfg.get("num_chunks", 2)), 4)
+
+  with open(leaf_dir / "environment_config.yml", "w") as f:
+    yaml.safe_dump(base_env_cfg, f, sort_keys=False, default_flow_style=False)
+
+  # Read optimal parameters from skf_combination
+  with open(skf_comb_opt_file, "r") as f:
+    skf_comb_opt = yaml.safe_load(f) or {}
+
+  # Read optimal parameters from skf_l_combination
+  with open(skf_l_comb_opt_file, "r") as f:
+    skf_l_comb_opt = yaml.safe_load(f) or {}
+
+  slow_epsilon_skf = float(_validate_numeric(skf_comb_opt["epsilon_2"], "skf_combination:epsilon_2"))
+  var_eta = float(_validate_numeric(skf_comb_opt.get("var_eta", 0.001), "var_eta"))
+  v_tilde_0 = float(_validate_numeric(skf_comb_opt.get("v_tilde_0", 1.0), "v_tilde_0"))
+
+  slow_epsilon_skf_l = float(_validate_numeric(skf_l_comb_opt["epsilon_2"], "skf_l_combination:epsilon_2"))
+  b_eta = float(_validate_numeric(skf_l_comb_opt.get("b_eta", np.sqrt(1e-3 / 2)), "b_eta"))
+
+  cvx_comb_skf_params = {
+      "label": "cvx_comb_sKF",
+      "epsilon_1": float(_validate_numeric(skf_comb_opt["epsilon_1"], "epsilon_1")),
+      "epsilon_2": slow_epsilon_skf,
+      "var_eta": var_eta,
+      "v_tilde_0": v_tilde_0,
+      "mu_a": float(_validate_numeric(skf_comb_opt["mu_a"], "mu_a")),
+      "a_plus": float(_validate_numeric(skf_comb_opt["a_plus"], "a_plus")),
+      "tau": float(_validate_numeric(skf_comb_opt["tau"], "tau")),
+      "l": float(_validate_numeric(skf_comb_opt["l"], "l")),
+      "reg_rho": float(_validate_numeric(skf_comb_opt["reg_rho"], "reg_rho")),
+      "lambda_0": float(_validate_numeric(skf_comb_opt["lambda_0"], "lambda_0")),
+  }
+
+  cvx_comb_skf_l_params = {
+      "label": "cvx_comb_sKF_L",
+      "epsilon_1": float(_validate_numeric(skf_l_comb_opt["epsilon_1"], "epsilon_1")),
+      "epsilon_2": slow_epsilon_skf_l,
+      "b_eta": b_eta,
+      "v_tilde_0": v_tilde_0,
+      "mu_a": float(_validate_numeric(skf_l_comb_opt["mu_a"], "mu_a")),
+      "a_plus": float(_validate_numeric(skf_l_comb_opt["a_plus"], "a_plus")),
+      "tau": float(_validate_numeric(skf_l_comb_opt["tau"], "tau")),
+      "l": float(_validate_numeric(skf_l_comb_opt["l"], "l")),
+      "reg_rho": float(_validate_numeric(skf_l_comb_opt["reg_rho"], "reg_rho")),
+      "lambda_0": float(_validate_numeric(skf_l_comb_opt["lambda_0"], "lambda_0")),
+  }
+
+  algo_configs = {
+      "skf_algorithm.yml": {
+          "algorithm": "sKF_algorithm",
+          "parameter_class": "sKF_parameters",
+          "parameters": {
+              "label": "sKF",
+              "epsilon": slow_epsilon_skf,
+              "var_eta": var_eta,
+              "v_tilde_0": v_tilde_0,
+          },
+      },
+      "skf_l_algorithm.yml": {
+          "algorithm": "sKF_L_algorithm",
+          "parameter_class": "sKF_L_parameters",
+          "parameters": {
+              "label": "sKF-L",
+              "epsilon": slow_epsilon_skf_l,
+              "b_eta": b_eta,
+              "v_tilde_0": v_tilde_0,
+          },
+      },
+      "gisv_skf_algorithm.yml": {
+          "algorithm": "GISV_sKF_algorithm",
+          "parameter_class": "sKF_parameters",
+          "parameters": {
+              "label": "GISV-sKF",
+              "epsilon": 0.0,
+              "var_eta": var_eta,
+              "v_tilde_0": v_tilde_0,
+          },
+      },
+      "gisv_skf_l_algorithm.yml": {
+          "algorithm": "GISV_sKF_L_algorithm",
+          "parameter_class": "GISV_sKF_L_parameters",
+          "parameters": {
+              "label": "GISV-sKF-L",
+              "b_eta": b_eta,
+              "v_tilde_0": v_tilde_0,
+              "epsilon_min": slow_epsilon_skf_l,
+          },
+      },
+      "cvx_comb_skf.yml": {
+          "algorithm": "cvx_comb_sKF",
+          "parameter_class": "cvx_comb_sKF_parameters",
+          "parameters": cvx_comb_skf_params,
+      },
+      "cvx_comb_skf_l.yml": {
+          "algorithm": "cvx_comb_sKF_L",
+          "parameter_class": "cvx_comb_sKF_L_parameters",
+          "parameters": cvx_comb_skf_l_params,
+      },
+  }
+
+  for fname, cfg in algo_configs.items():
+    with open(leaf_dir / fname, "w") as f:
+      yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
+
+  print(f"Loaded optimal parameters and N = {N} from grid searches for: {env}/{target}/{inp}")
+  return leaf_dir
+
+
 def import_optimal_parameters_to_configs(
     grid_searches_root: str | Path = "experiments/grid_searches",
     comparisons_root: str | Path = "experiments/comparisons/gisv_vs_combinations",
@@ -118,23 +308,23 @@ def import_optimal_parameters_to_configs(
   """Import optimal parameters from grid searches and generate standardized YAML configs per algorithm.
 
   For each environment/target_msd/input_characteristic leaf:
-    1. Copies environment_config.yml from skf_combination grid search.
+    1. Loads N from skf_combination and skf_l_combination and selects max(skf_N, skf_l_N).
     2. Reads optimal_parameters.yml from skf_combination and skf_l_combination.
     3. Generates 6 algorithm YAML files:
-       - skf_algorithm.yml (adjusted with slow filter epsilon)
-       - skf_l_algorithm.yml (adjusted with slow filter epsilon)
+       - skf_algorithm.yml (adjusted with slow filter epsilon from skf_combination)
+       - skf_l_algorithm.yml (adjusted with slow filter epsilon from skf_l_combination)
        - gisv_skf_algorithm.yml
-       - gisv_skf_l_algorithm.yml (epsilon_min set to slow filter epsilon)
-       - cvx_comb_skf.yml (with optimal grid search parameters)
-       - cvx_comb_skf_l.yml (with optimal grid search parameters)
+       - gisv_skf_l_algorithm.yml (epsilon_min set to slow filter epsilon from skf_l_combination)
+       - cvx_comb_skf.yml (with optimal grid search parameters from skf_combination)
+       - cvx_comb_skf_l.yml (with optimal grid search parameters from skf_l_combination)
 
   Returns
   -------
   list[Path]
     List of leaf directory paths created/updated.
   """
-  grid_root = Path(grid_searches_root)
-  comp_root = Path(comparisons_root)
+  grid_root = Path(grid_searches_root).resolve()
+  comp_root = Path(comparisons_root).resolve()
 
   environments = ["gaussian", "laplacian", "heavy_tail"]
   target_msds = ["-30dB", "-40dB", "-50dB"]
@@ -145,130 +335,12 @@ def import_optimal_parameters_to_configs(
   for env in environments:
     for target in target_msds:
       for inp in inputs:
-        skf_comb_dir = grid_root / "skf_combination" / env / target / inp
-        skf_l_comb_dir = grid_root / "skf_l_combination" / env / target / inp
-
-        skf_comb_opt_file = skf_comb_dir / "optimal_parameters.yml"
-        skf_l_comb_opt_file = skf_l_comb_dir / "optimal_parameters.yml"
-        env_config_file = skf_comb_dir / "environment_config.yml"
-
-        if not (skf_comb_opt_file.is_file() and skf_l_comb_opt_file.is_file() and env_config_file.is_file()):
+        leaf_dir = comp_root / env / target / inp
+        try:
+          update_leaf_from_grid_searches(leaf_dir, grid_root)
+          created_leaves.append(leaf_dir)
+        except FileNotFoundError:
           continue
-
-        target_leaf_dir = comp_root / env / target / inp
-        target_leaf_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1. Read and validate environment_config.yml
-        with open(env_config_file, "r") as f:
-          env_cfg = yaml.safe_load(f) or {}
-
-        # Write clean environment_config.yml
-        with open(target_leaf_dir / "environment_config.yml", "w") as f:
-          yaml.safe_dump(env_cfg, f, sort_keys=False, default_flow_style=False)
-
-        # 2. Read optimal parameters from skf_combination
-        with open(skf_comb_opt_file, "r") as f:
-          skf_comb_opt = yaml.safe_load(f) or {}
-
-        # 3. Read optimal parameters from skf_l_combination
-        with open(skf_l_comb_opt_file, "r") as f:
-          skf_l_comb_opt = yaml.safe_load(f) or {}
-
-        # Extract fixed parameters with strict numeric validation
-        slow_epsilon = float(_validate_numeric(skf_comb_opt["epsilon_2"], "epsilon_2"))
-        var_eta = float(_validate_numeric(skf_comb_opt.get("var_eta", 0.001), "var_eta"))
-        v_tilde_0 = float(_validate_numeric(skf_comb_opt.get("v_tilde_0", 1.0), "v_tilde_0"))
-        b_eta = float(_validate_numeric(skf_l_comb_opt.get("b_eta", np.sqrt(1e-3 / 2)), "b_eta"))
-
-        # Build clean numeric dictionary for cvx_comb_sKF
-        cvx_comb_skf_params = {
-            "label": "cvx_comb_sKF",
-            "epsilon_1": float(_validate_numeric(skf_comb_opt["epsilon_1"], "epsilon_1")),
-            "epsilon_2": slow_epsilon,
-            "var_eta": var_eta,
-            "v_tilde_0": v_tilde_0,
-            "mu_a": float(_validate_numeric(skf_comb_opt["mu_a"], "mu_a")),
-            "a_plus": float(_validate_numeric(skf_comb_opt["a_plus"], "a_plus")),
-            "tau": float(_validate_numeric(skf_comb_opt["tau"], "tau")),
-            "l": float(_validate_numeric(skf_comb_opt["l"], "l")),
-            "reg_rho": float(_validate_numeric(skf_comb_opt["reg_rho"], "reg_rho")),
-            "lambda_0": float(_validate_numeric(skf_comb_opt["lambda_0"], "lambda_0")),
-        }
-
-        # Build clean numeric dictionary for cvx_comb_sKF_L
-        cvx_comb_skf_l_params = {
-            "label": "cvx_comb_sKF_L",
-            "epsilon_1": float(_validate_numeric(skf_l_comb_opt["epsilon_1"], "epsilon_1")),
-            "epsilon_2": slow_epsilon,
-            "b_eta": b_eta,
-            "v_tilde_0": v_tilde_0,
-            "mu_a": float(_validate_numeric(skf_l_comb_opt["mu_a"], "mu_a")),
-            "a_plus": float(_validate_numeric(skf_l_comb_opt["a_plus"], "a_plus")),
-            "tau": float(_validate_numeric(skf_l_comb_opt["tau"], "tau")),
-            "l": float(_validate_numeric(skf_l_comb_opt["l"], "l")),
-            "reg_rho": float(_validate_numeric(skf_l_comb_opt["reg_rho"], "reg_rho")),
-            "lambda_0": float(_validate_numeric(skf_l_comb_opt["lambda_0"], "lambda_0")),
-        }
-
-        # Algorithm configs
-        algo_configs = {
-            "skf_algorithm.yml": {
-                "algorithm": "sKF_algorithm",
-                "parameter_class": "sKF_parameters",
-                "parameters": {
-                    "label": "sKF",
-                    "epsilon": slow_epsilon,
-                    "var_eta": var_eta,
-                    "v_tilde_0": v_tilde_0,
-                },
-            },
-            "skf_l_algorithm.yml": {
-                "algorithm": "sKF_L_algorithm",
-                "parameter_class": "sKF_L_parameters",
-                "parameters": {
-                    "label": "sKF-L",
-                    "epsilon": slow_epsilon,
-                    "b_eta": b_eta,
-                    "v_tilde_0": v_tilde_0,
-                },
-            },
-            "gisv_skf_algorithm.yml": {
-                "algorithm": "GISV_sKF_algorithm",
-                "parameter_class": "sKF_parameters",
-                "parameters": {
-                    "label": "GISV-sKF",
-                    "epsilon": 0.0,
-                    "var_eta": var_eta,
-                    "v_tilde_0": v_tilde_0,
-                },
-            },
-            "gisv_skf_l_algorithm.yml": {
-                "algorithm": "GISV_sKF_L_algorithm",
-                "parameter_class": "GISV_sKF_L_parameters",
-                "parameters": {
-                    "label": "GISV-sKF-L",
-                    "b_eta": b_eta,
-                    "v_tilde_0": v_tilde_0,
-                    "epsilon_min": slow_epsilon,
-                },
-            },
-            "cvx_comb_skf.yml": {
-                "algorithm": "cvx_comb_sKF",
-                "parameter_class": "cvx_comb_sKF_parameters",
-                "parameters": cvx_comb_skf_params,
-            },
-            "cvx_comb_skf_l.yml": {
-                "algorithm": "cvx_comb_sKF_L",
-                "parameter_class": "cvx_comb_sKF_L_parameters",
-                "parameters": cvx_comb_skf_l_params,
-            },
-        }
-
-        for fname, cfg in algo_configs.items():
-          with open(target_leaf_dir / fname, "w") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
-
-        created_leaves.append(target_leaf_dir)
 
   return created_leaves
 
@@ -407,9 +479,15 @@ def load_leaf_configurations(leaf_dir: str | Path) -> dict[str, Any]:
   }
 
 
-def run_comparison_leaf(leaf_dir: str | Path) -> dict[str, Any]:
+def run_comparison_leaf(
+    leaf_dir: str | Path,
+    grid_searches_root: str | Path = "experiments/grid_searches",
+) -> dict[str, Any]:
   """Execute the Monte Carlo comparison for a single leaf directory."""
   leaf = Path(leaf_dir).resolve()
+  # Load optimal parameters and appropriate number of samples from grid searches
+  update_leaf_from_grid_searches(leaf, grid_searches_root)
+
   print(f"\n{'=' * 70}")
   print(f"Running comparison for: {leaf}")
   print(f"{'=' * 70}")
@@ -621,7 +699,7 @@ def main() -> None:
     import_optimal_parameters_to_configs(grid_searches_root, comparisons_root)
 
   if args.config:
-    leaf_dir = Path(args.config)
+    leaf_dir = resolve_leaf_dir(args.config, comparisons_root)
     if not leaf_dir.is_dir():
       # If leaf_dir does not exist but is under comparisons_root, try populating configs
       import_optimal_parameters_to_configs(grid_searches_root, comparisons_root)
@@ -632,10 +710,10 @@ def main() -> None:
       sys.stderr.write(f"{'!' * 70}\n\n")
       sys.exit(1)
 
-    run_comparison_leaf(leaf_dir)
+    run_comparison_leaf(leaf_dir, grid_searches_root)
 
   elif args.all:
-    # Ensure all 18 configs are generated
+    # Ensure all 18 configs are generated and updated from grid searches
     import_optimal_parameters_to_configs(grid_searches_root, comparisons_root)
     leaves = find_comparison_leaves(comparisons_root)
 
@@ -648,7 +726,7 @@ def main() -> None:
 
     for idx, leaf in enumerate(leaves, 1):
       print(f"\n>>> Running leaf [{idx}/{len(leaves)}]: {leaf.relative_to(comparisons_root)}")
-      run_comparison_leaf(leaf)
+      run_comparison_leaf(leaf, grid_searches_root)
 
     total_time = time.time() - total_start
     print(f"\n{'=' * 70}")
