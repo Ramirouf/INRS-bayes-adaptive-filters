@@ -219,15 +219,18 @@ def main() -> None:
     print(f"Batch completed: {len(pending_experiments)} experiments processed in {t_all_elapsed:.2f} seconds.")
     print(f"{'=' * 70}\n")
 
-    summary_script = Path("experiments/grid_search_summary/gs_summary.py")
+    summary_script = Path("grid_search_summary.py")
+    if not summary_script.is_file():
+      summary_script = Path("experiments/grid_search_summary/gs_summary.py")
+
     if summary_script.is_file():
-      print("Updating cross-experiment summary figures via gs_summary.py...")
+      print(f"Updating cross-experiment summary figures via {summary_script.name}...")
       try:
         import subprocess
         subprocess.run([sys.executable, str(summary_script)], check=True)
         print("Summary figures updated successfully.\n")
       except Exception as err:
-        print(f"Warning: Could not run gs_summary.py: {err}\n")
+        print(f"Warning: Could not run {summary_script.name}: {err}\n")
 
 
 if __name__ == "__main__":

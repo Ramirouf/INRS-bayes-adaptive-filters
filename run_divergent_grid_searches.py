@@ -147,15 +147,18 @@ def main() -> None:
       print(f"  - {f_path} ({f_time:.1f}s): {f_err}")
 
   # Automatically regenerate cross-experiment summary plots
-  summary_script = Path("experiments/grid_search_summary/gs_summary.py")
+  summary_script = Path("grid_search_summary.py")
+  if not summary_script.is_file():
+    summary_script = Path("experiments/grid_search_summary/gs_summary.py")
+
   if summary_script.is_file():
-    print(f"\nRegenerating cross-experiment summary figures via gs_summary.py...")
+    print(f"\nRegenerating cross-experiment summary figures via {summary_script.name}...")
     try:
       import subprocess
       subprocess.run([sys.executable, str(summary_script)], check=True)
       print("Summary figures updated successfully.")
     except Exception as err:
-      print(f"Warning: Could not run gs_summary.py: {err}")
+      print(f"Warning: Could not run {summary_script.name}: {err}")
 
 
 if __name__ == "__main__":
